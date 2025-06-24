@@ -35,13 +35,13 @@ const (
 
 var (
 	recordTypeMap map[int]string = map[int]string{
-		COMMUNICATIONS: "communications",
-		CONTRACTS:      "contracts",
-		ELECTION_INFO:  "elections_info",
-		MINUTES:        "minutes",
-		ORDINACES:      "ordinances",
-		RESOLUTIONS:    "resolutions",
-		STAFF_REPORTS:  "staff_reports",
+		// COMMUNICATIONS: "Communications",
+		// CONTRACTS:      "Contracts",
+		// ELECTION_INFO:  "Elections Info",
+		// MINUTES:        "Minutes",
+		// ORDINACES: "Ordinances",
+		// RESOLUTIONS:   "Resolutions",
+		STAFF_REPORTS: "Staff Reports",
 	}
 )
 
@@ -72,6 +72,9 @@ func main() {
 		})
 	}
 
+	fmt.Println("About:")
+	driveService.About(ctx)
+
 	fmt.Println("Files:")
 	fileIDs, err := driveService.ListIds(ctx)
 
@@ -83,9 +86,9 @@ func main() {
 	// 	}
 	// }
 
-	files, err := driveService.List(ctx)
-	b, _ := json.MarshalIndent(files, " ", " ")
-	fmt.Println(string(b))
+	// files, err := driveService.List(ctx)
+	// b, _ := json.MarshalIndent(files, " ", " ")
+	// fmt.Println(string(b))
 
 loop:
 	for id, _ := range recordTypeMap {
@@ -178,7 +181,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 	}
 
 	// check if records are out of date
-	if diff := time.Now().Sub(created); diff.Hours() < 7*24 {
+	if diff := time.Now().Sub(created); diff.Hours() < 24 {
 		reader, err = driveService.DownloadRecord(ctx, recordID)
 		if err != nil {
 			fmt.Println("Error downloading file: " + recordID)
@@ -210,7 +213,11 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 	}
 
 	fmt.Printf("Fetching records: %s\n", recordTypeMap[queryID])
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://records.cityofberkeley.info/PublicAccess/api/CustomQuery/KeywordSearch", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		"https://records.cityofberkeley.info/PublicAccess/api/CustomQuery/KeywordSearch",
+		bytes.NewReader(b))
 
 	if err != nil {
 		return nil, fmt.Errorf("Error creating request: %s: %w", recordID, err)
@@ -289,11 +296,10 @@ type Record struct {
 func (r Record) Properties() map[string]string {
 	m := map[string]string{}
 	for i, column := range r.DisplayColumns {
-		key := propertyKey(column.Heading)
-		if key == "" {
+		if column.Heading == "" {
 			continue
 		}
-		m[key] = r.DisplayColumnValues[i].Value
+		m[column.Heading] = r.DisplayColumnValues[i].Value
 	}
 	return m
 }

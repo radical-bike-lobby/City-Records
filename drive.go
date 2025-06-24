@@ -192,7 +192,11 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 		ModifiedTime: created,
 	}
 
-	metadata.Properties = record.Properties()
+	metadata.Properties = map[string]string{}
+	for key, value := range record.Properties() {
+		fKey, fValue := propertyKeyValue(key, value)
+		metadata.Properties[fKey] = fValue
+	}
 	metadata.Properties["record_id"] = record.ID
 
 	if record.ParentId != "" {
@@ -202,7 +206,8 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 	// log.Printf("Uploading file with ID: : %s", record.ID)
 	res, err := d.service.Files.Create(metadata).Media(reader).Do()
 	if err != nil {
-		return fmt.Errorf("Error creating file: %s: %w", record.ID, err)
+		b, _ := json.MarshalIndent(metadata, " ", " ")
+		return fmt.Errorf("Error creating file: %s: %w", string(b), err)
 	}
 
 	b, err := json.Marshal(res)
