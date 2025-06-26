@@ -21,7 +21,7 @@ import (
 const (
 	securePrefix = "19xYG2-JL-onVDe01kDQUgtu5eG9HHLIG"
 
-	numWorkers = 10
+	numWorkers = 5
 )
 
 type RecordType int
@@ -105,10 +105,10 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 	for i := 0; i < numWorkers; i++ {
 		group.Go(func() error {
 			for record := range tasks {
-				transferRecord(gctx, driveService, record)
-				// if err != nil {
-				// 	return err
-				// }
+				err := transferRecord(gctx, driveService, record)
+				if err != nil {
+					return err
+				}
 			}
 			return nil
 		})
