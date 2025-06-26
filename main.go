@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/sync/errgroup"
+	drive "google.golang.org/api/drive/v3"
 )
 
 const (
@@ -22,30 +23,37 @@ const (
 
 	numWorkers = 10
 )
+
+type RecordType int
+
 const (
-	ALL_RECORDS    = 127
-	COMMUNICATIONS = 129
-	CONTRACTS      = 126
-	ELECTION_INFO  = 114
-	MINUTES        = 131
-	ORDINACES      = 132
-	RESOLUTIONS    = 133
-	STAFF_REPORTS  = 134
+	ALL_RECORDS    RecordType = 127
+	COMMUNICATIONS            = 129
+	CONTRACTS                 = 126
+	ELECTION_INFO             = 114
+	MINUTES                   = 131
+	ORDINACES                 = 132
+	RESOLUTIONS               = 133
+	STAFF_REPORTS             = 134
 )
 
 var (
-	recordTypeMap map[int]string = map[int]string{
-		// COMMUNICATIONS: "Communications",
-		// CONTRACTS:      "Contracts",
-		// ELECTION_INFO:  "Elections Info",
-		// MINUTES:        "Minutes",
-		// ORDINACES: "Ordinances",
-		// RESOLUTIONS:   "Resolutions",
-		STAFF_REPORTS: "Staff Reports",
+	recordTypeMap map[RecordType]string = map[RecordType]string{
+		COMMUNICATIONS: "Communications",
+		CONTRACTS:      "Contracts",
+		ELECTION_INFO:  "Elections Info",
+		MINUTES:        "Minutes",
+		ORDINACES:      "Ordinances",
+		RESOLUTIONS:    "Resolutions",
+		STAFF_REPORTS:  "Staff Reports",
 	}
 )
 
 var client = &http.Client{}
+
+func init() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+}
 
 func main() {
 	ctx := context.Background()
@@ -57,73 +65,81 @@ func main() {
 		return
 	}
 
+	// err = driveService.DeleteAllFiles(ctx)
+	// if err != nil {
+	// 	fmt.Println(err.Error())
+	// 	return
+	// }
+
+	// driveService.PrintAllFiles(ctx)
+	driveService.About(ctx)
+
+	fileIDs, err := driveService.ListRecordIds(ctx)
+	if err != nil {
+		log.Println("Error listing files:", err)
+		return
+	}
+
+	group, gctx := errgroup.WithContext(ctx)
+	for id, name := range recordTypeMap {
+		group.Go(func() error {
+			count, err := syncRecords(gctx, driveService, id, fileIDs)
+			if err != nil {
+				return err
+			}
+			log.Printf("sync'd %d files of type: %s", count, name)
+			return nil
+		})
+	}
+	err = group.Wait()
+	log.Println(err)
+}
+
+// syncRecords syncs all records of recordType from the city repository to Drive
+func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType, currentFileIDs map[string]string) (int64, error) {
+	count := int64(0)
+
 	group, gctx := errgroup.WithContext(ctx)
 	tasks := make(chan *Record)
 
 	for i := 0; i < numWorkers; i++ {
 		group.Go(func() error {
 			for record := range tasks {
-				err = transferRecord(gctx, driveService, record)
-				if err != nil {
-					return err
-				}
+				transferRecord(gctx, driveService, record)
+				// if err != nil {
+				// 	return err
+				// }
 			}
 			return nil
 		})
 	}
 
-	fmt.Println("About:")
-	driveService.About(ctx)
-
-	fmt.Println("Files:")
-	fileIDs, err := driveService.ListIds(ctx)
-
-	// for _, id := range fileIDs {
-	// 	err := driveService.Delete(ctx, id)
-	// 	if err != nil {
-	// 		log.Println("Error fetching records:", err)
-	// 		return
-	// 	}
-	// }
-
-	// files, err := driveService.List(ctx)
-	// b, _ := json.MarshalIndent(files, " ", " ")
-	// fmt.Println(string(b))
-
-loop:
-	for id, _ := range recordTypeMap {
-		recordType := recordTypeMap[id]
-		records, err := fetchRecords(ctx, driveService, id)
-		if err != nil {
-			log.Println("Error fetching records:", err)
-			return
-		}
-
-		folder, err := driveService.FindOrCreateFolder(ctx, recordType)
-		if err != nil {
-			log.Println("Error fetching records:", err)
-			return
-		}
-
-		for _, record := range records.Data {
-			record.ParentId = folder.Id
-			if _, ok := fileIDs[record.ID]; ok {
-				continue
-			}
-
-			select {
-			case <-gctx.Done():
-				break loop
-			case tasks <- record:
-			}
-		}
-	}
-
-	err = group.Wait()
+	name := recordTypeMap[recordType]
+	records, err := fetchRecords(ctx, driveService, recordType)
 	if err != nil {
-		log.Println("Error encountered: %w", err)
+		return count, fmt.Errorf("Error fetching records for type: %d, %w", recordType, err)
 	}
 
+	folder, err := driveService.FindOrCreateFolder(ctx, name)
+	if err != nil {
+		return count, fmt.Errorf("Error creating folder: %s, %w", name, err)
+	}
+
+	for _, record := range records.Data {
+		count += 1
+		record.ParentId = folder.Id
+		if _, ok := currentFileIDs[record.ID]; ok {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return count, ctx.Err()
+		case tasks <- record:
+		}
+	}
+
+	return count, group.Wait()
 }
 
 // transferRecords iterates the passed in records, downloads from the city records site and uploads to google drive
@@ -147,7 +163,7 @@ func transferRecord(ctx context.Context, driveService *Drive, record *Record) er
 // fetchRecords fetches records from the city records site (records.cityofberkeley.info)
 // It caches these records into drive and will fetch them from drive on subsequent calls
 // If the set of records is too old (older than 7 days), they are refetched and cached again.
-func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Records, error) {
+func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) (*Records, error) {
 
 	var data Records
 
@@ -156,6 +172,10 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 	// see Records type
 	defer func() {
 		for _, record := range data.Data {
+			if fixed, ok := fixedRecords[record.ID]; ok {
+				record.Merge(fixed)
+			}
+			record.Type = queryID
 			record.DisplayColumns = data.DisplayColumns
 		}
 	}()
@@ -163,11 +183,13 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 	// Fetch records from google drive first
 	// If the set of records are too old, refetch from city records site
 	var reader io.ReadCloser
-	recordsType := recordTypeMap[queryID]
 
-	recordID := fmt.Sprintf("%s:%s:%d", securePrefix, recordsType, queryID)
+	name := recordTypeMap[queryID]
+	key, _ := propertyKeyValue(name, "")
 
-	file, err := driveService.FindRecord(ctx, recordID)
+	recordID := fmt.Sprintf("%s:%s:%d", securePrefix, key, queryID)
+
+	file, err := driveService.FindFileByProperty(ctx, "record_id", recordID)
 	if err != nil {
 		return nil, fmt.Errorf("Error fetching file: %w", err)
 	}
@@ -182,7 +204,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 
 	// check if records are out of date
 	if diff := time.Now().Sub(created); diff.Hours() < 24 {
-		reader, err = driveService.DownloadRecord(ctx, recordID)
+		reader, err = driveService.DownloadFile(ctx, file.Id)
 		if err != nil {
 			fmt.Println("Error downloading file: " + recordID)
 			return nil, fmt.Errorf("Error downloading file: %s: %w", recordID, err)
@@ -190,7 +212,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 	}
 
 	if reader != nil {
-		fmt.Println("Fetched cached records")
+		fmt.Println("Fetched cached records for type: ", name)
 		defer reader.Close()
 		decoder := json.NewDecoder(reader)
 		err := decoder.Decode(&data)
@@ -202,7 +224,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 		Keywords   []string
 		QueryLimit int
 	}{
-		queryID,
+		int(queryID),
 		[]string{},
 		0,
 	}
@@ -227,7 +249,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error sending request for queryID: %s: %v", queryID, err)
+		log.Printf("Error sending request for queryID: %d: %v", queryID, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -246,7 +268,13 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID int) (*Recor
 	}
 
 	// Upload to drive
-	err = driveService.UploadRecord(ctx, &Record{ID: recordID, Name: recordsType + ".json"}, bytes.NewReader(body))
+	file = &drive.File{
+		Name: key + ".json",
+		Properties: map[string]string{
+			"record_id": recordID,
+		},
+	}
+	err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("Error uploading records: %s: %w", recordID, err)
 	}
@@ -285,12 +313,32 @@ func fetchDocument(ctx context.Context, id string) (io.ReadCloser, error) {
 
 type Record struct {
 	ID                  string
+	Type                RecordType `json:"-"` // This field will be ignored
 	Name                string
 	DisplayType         string
 	DisplayColumnValues []DisplayColumnValue
 	DisplayColumns      []DisplayColumn `json:"-"` // This field will be ignored
 	ParentId            string
 	Summary             string
+}
+
+func (r *Record) Merge(fixed Record) {
+
+	if fixed.Name != "" {
+		r.Name = fixed.Name
+	}
+	if len(r.DisplayColumnValues) != len(fixed.DisplayColumnValues) {
+		return
+	}
+
+	for i, column := range fixed.DisplayColumnValues {
+		if column.Value != "" {
+			r.DisplayColumnValues[i].Value = column.Value
+		}
+		if column.RawValue != "" {
+			r.DisplayColumnValues[i].RawValue = column.RawValue
+		}
+	}
 }
 
 func (r Record) Properties() map[string]string {
@@ -305,16 +353,20 @@ func (r Record) Properties() map[string]string {
 }
 
 func (r Record) DocDate() (time.Time, error) {
-	value, rawValue := r.fromDisplay("doc date")
+
+	value, rawValue := r.fromDisplayType("date")
+	if rawValue == "" && value == "" {
+		return time.Time{}, fmt.Errorf("Date columns are empty")
+	}
 	millis, err := strconv.ParseInt(rawValue, 10, 64)
 	if err != nil {
-		return time.Parse("6/15/2006", value)
+		return time.Parse("1/_2/2006", value)
 	}
 	return time.UnixMilli(millis), nil
 }
 
 func (r Record) DocSource() string {
-	value, rawValue := r.fromDisplay("doc source")
+	value, rawValue := r.fromDisplayHeading("doc source")
 	if value == "" || value == "null" {
 		return rawValue
 	}
@@ -322,7 +374,7 @@ func (r Record) DocSource() string {
 }
 
 func (r Record) DocName() string {
-	value, rawValue := r.fromDisplay("doc name")
+	value, rawValue := r.fromDisplayHeading("doc name")
 	switch {
 	case value != "" && value != "null":
 		return value
@@ -334,14 +386,25 @@ func (r Record) DocName() string {
 }
 
 func (r Record) MeetingType() string {
-	value, rawValue := r.fromDisplay("meeting type")
+	value, rawValue := r.fromDisplayHeading("meeting type")
 	if value == "" || value == "null" {
 		return rawValue
 	}
 	return value
 }
 
-func (r Record) fromDisplay(name string) (string, string) {
+func (r Record) fromDisplayType(_type string) (string, string) {
+	for i, column := range r.DisplayColumns {
+		if strings.ToLower(column.DataType) == strings.ToLower(_type) {
+			value := r.DisplayColumnValues[i].Value
+			rawValue := r.DisplayColumnValues[i].RawValue
+			return value, rawValue
+		}
+	}
+	return "", ""
+}
+
+func (r Record) fromDisplayHeading(name string) (string, string) {
 	for i, column := range r.DisplayColumns {
 		if strings.ToLower(column.Heading) == strings.ToLower(name) {
 			value := r.DisplayColumnValues[i].Value

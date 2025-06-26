@@ -7,9 +7,11 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/sync/errgroup"
 	drive "google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
@@ -49,7 +51,7 @@ func NewDrive(ctx context.Context) (*Drive, error) {
 
 // about returns info about the drive account
 func (d *Drive) About(ctx context.Context) error {
-	about, err := d.service.About.Get().Fields("*").Do()
+	about, err := d.service.About.Get().Fields("storageQuota").Do()
 	if err != nil {
 		return err
 	}
@@ -62,6 +64,19 @@ func (d *Drive) About(ctx context.Context) error {
 	return nil
 }
 
+func (d *Drive) FindFileByProperty(ctx context.Context, key string, value string) (*drive.File, error) {
+	query := fmt.Sprintf("properties has { key='%s' and value='%s' }", key, value)
+	files, err := d.List(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(files.Files) > 0 {
+		return files.Files[0], nil
+	}
+
+	return nil, nil
+}
 func (d *Drive) FindRecord(ctx context.Context, id string) (*drive.File, error) {
 	query := "properties has { key='record_id' and value='" + id + "'}"
 	files, err := d.List(ctx, query)
@@ -96,11 +111,6 @@ func (d *Drive) FindOrCreateFolder(ctx context.Context, path string) (*drive.Fil
 	return files.Files[0], nil
 }
 
-func (d *Drive) Delete(ctx context.Context, id string) error {
-	log.Printf("Deleting file with ID: : %s", id)
-	return d.service.Files.Delete(id).Do()
-}
-
 func (d *Drive) List(ctx context.Context, filter ...string) (*drive.FileList, error) {
 
 	query := d.service.Files.List().PageSize(1000).
@@ -113,7 +123,59 @@ func (d *Drive) List(ctx context.Context, filter ...string) (*drive.FileList, er
 	return query.Do()
 }
 
-func (d *Drive) ListIds(ctx context.Context) (map[string]string, error) {
+func (d *Drive) PrintAllFiles(ctx context.Context) error {
+	files, err := d.List(ctx)
+	if err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(files, " ", " ")
+	fmt.Println(string(b))
+	return nil
+}
+
+func (d *Drive) Delete(ctx context.Context, id string) error {
+	log.Printf("Deleting file with ID: : %s", id)
+	return d.service.Files.Delete(id).Do()
+}
+
+func (d *Drive) DeleteAllFiles(ctx context.Context) error {
+
+	log.Printf("Start deleting all files")
+	files, err := d.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Deleting %d files", len(files.Files))
+	group, gctx := errgroup.WithContext(ctx)
+	tasks := make(chan *drive.File)
+
+	for i := 0; i < 50; i++ {
+		group.Go(func() error {
+			for file := range tasks {
+				err := d.Delete(gctx, file.Id)
+				if err != nil {
+					return fmt.Errorf("Error deleting file: %s. %w", file.Name, err)
+				}
+			}
+			return nil
+		})
+	}
+
+	for _, file := range files.Files {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case tasks <- file:
+		}
+
+	}
+	close(tasks)
+	return group.Wait()
+}
+
+// ListRecordIds returns a map of Record ids to Drive file ids
+func (d *Drive) ListRecordIds(ctx context.Context) (map[string]string, error) {
 
 	fileIDs := map[string]string{}
 	pageToken := ""
@@ -148,27 +210,34 @@ func (d *Drive) ListIds(ctx context.Context) (map[string]string, error) {
 	return fileIDs, nil
 }
 
-// Download downloads a file from google drive by 'record_id' field. This is distinct from the
-// google assigned document id. It is derived from the original document id from the city records.
-func (d *Drive) DownloadRecord(ctx context.Context, record_id string) (io.ReadCloser, error) {
-	file, err := d.FindRecord(ctx, record_id)
-	if err != nil {
-		return nil, err
-	}
-
-	if file == nil {
-		return nil, nil
-	}
-
-	resp, err := d.service.Files.Get(file.Id).Download()
+// DownloadFile downloads the specified Drive file
+func (d *Drive) DownloadFile(ctx context.Context, id string) (io.ReadCloser, error) {
+	resp, err := d.service.Files.Get(id).Download()
 	if err != nil {
 		return nil, fmt.Errorf("failed to download file: %w", err)
 	}
 	return resp.Body, nil
 }
 
+func (d *Drive) UploadFile(ctx context.Context, metadata *drive.File, reader io.Reader) error {
+	// log.Printf("Uploading file with ID: : %s", record.ID)
+	res, err := d.service.Files.Create(metadata).Media(reader).Do()
+	if err != nil {
+		b, _ := json.MarshalIndent(metadata, " ", " ")
+		return fmt.Errorf("Error creating file: %s: %w", string(b), err)
+	}
+
+	b, err := json.Marshal(res)
+	if err != nil {
+		return fmt.Errorf("Error marshalling body for file: %s: %w", metadata.Name, err)
+	}
+	log.Printf("File uploaded successfully. Resp: %v", string(b))
+	return nil
+}
+
 func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Reader) error {
 
+	log.Println("Uploading record: ", record.ID)
 	if file, err := d.FindRecord(ctx, record.ID); err != nil {
 		return err
 	} else if file != nil {
@@ -176,13 +245,17 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 		return nil
 	}
 
-	name := record.DocName()
+	name := strings.TrimSpace(record.DocName())
 	date, err := record.DocDate()
+
 	if err != nil {
 		date = time.Now()
 		b, _ := json.MarshalIndent(record, " ", " ")
 		fmt.Println(string(b))
-		fmt.Printf("Error fetching created data from record: %s, err: %w", record.ID, err)
+		b, _ = json.MarshalIndent(record.DisplayColumns, " ", " ")
+		fmt.Println(string(b))
+		return fmt.Errorf("Error fetching CreatedDate from record: %s, err: %w", record.ID, err)
+
 	}
 
 	created := date.Format(time.RFC3339)
@@ -198,22 +271,11 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 		metadata.Properties[fKey] = fValue
 	}
 	metadata.Properties["record_id"] = record.ID
+	metadata.Properties["record_type"] = fmt.Sprintf("%d", record.Type)
 
 	if record.ParentId != "" {
 		metadata.Parents = []string{record.ParentId}
 	}
 
-	// log.Printf("Uploading file with ID: : %s", record.ID)
-	res, err := d.service.Files.Create(metadata).Media(reader).Do()
-	if err != nil {
-		b, _ := json.MarshalIndent(metadata, " ", " ")
-		return fmt.Errorf("Error creating file: %s: %w", string(b), err)
-	}
-
-	b, err := json.Marshal(res)
-	if err != nil {
-		return fmt.Errorf("Error marshalling body: %s: %w", record.ID, err)
-	}
-	log.Printf("File uploaded successfully. Resp: %v", string(b))
-	return nil
+	return d.UploadFile(ctx, metadata, reader)
 }
