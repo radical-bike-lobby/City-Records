@@ -9,9 +9,12 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -20,11 +23,12 @@ import (
 )
 
 const (
-	securePrefix   = "19xYG2-JL-onVDe01kDQUgtu5eG9HHLIG"
-	sharedFolderID = "1z_WnsINGZxcoPoKWv7qlxyrjgMcbSRHo"
-
 	numWorkers = 5
+
+	SHARED_DRIVE_ID_ENV_VAR = "SHARED_DRIVE_ID"
 )
+
+var driveID = os.Getenv(SHARED_DRIVE_ID_ENV_VAR)
 
 type RecordType int
 
@@ -56,6 +60,11 @@ var driveService *Drive
 var failedRecords sync.Map
 
 func init() {
+
+	if driveID == "" {
+		log.Fatalf("Missing %s env var", SHARED_DRIVE_ID_ENV_VAR)
+	}
+
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	for k, v := range ignoredIds {
@@ -65,17 +74,33 @@ func init() {
 
 func cleanup() {
 	log.Printf("Cleaning up...")
-	log.Printf("Uploading failed files:")
 
-	// err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
+	failedRecords.Range(func(k, v interface{}) bool {
+		ignoredIds[k.(string)] = v.(string)
+		return true
+	})
+
+	b, _ := json.MarshalIndent(ignoredIds, " ", " ")
+	log.Printf("Failed records:\n%s", string(b))
+
+	os.Exit(0)
 }
 
 func main() {
+
+	go func() {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		<-sigs
+		log.Println("Caught shutdown signal")
+		cleanup()
+	}()
+
 	ctx := context.Background()
 
 	var err error
 
-	driveService, err = NewDrive(ctx, sharedFolderID)
+	driveService, err = NewDrive(ctx, driveID)
 
 	if err != nil {
 		log.Println("Error initializing drive service:", err)
@@ -108,8 +133,15 @@ func main() {
 			return nil
 		})
 	}
+
 	err = group.Wait()
-	log.Println(err)
+
+	if err != nil {
+		log.Println(err)
+	}
+
+	cleanup()
+
 }
 
 // syncRecords syncs all records of recordType from the city repository to Drive
@@ -206,7 +238,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 	name := recordTypeMap[queryID]
 	key, _ := propertyKeyValue(name, "")
 
-	recordID := fmt.Sprintf("%s:%s:%d", securePrefix, key, queryID)
+	recordID := fmt.Sprintf("%s:%s:%d", driveID, key, queryID)
 
 	file, err := driveService.FindFileByProperty(ctx, "record_id", recordID)
 	if err != nil {

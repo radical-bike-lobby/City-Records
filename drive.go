@@ -21,12 +21,12 @@ var credentialsFile = os.Getenv("CREDENTIALS_FILE")
 var userToImpersonate = os.Getenv("IMPERSONATE_SUBJECT")
 
 type Drive struct {
-	service  *drive.Service
-	parentID string
+	service *drive.Service
+	driveID string
 }
 
 // NewDrive creates a new drive service
-func NewDrive(ctx context.Context, parentID string) (*Drive, error) {
+func NewDrive(ctx context.Context, driveID string) (*Drive, error) {
 
 	file, err := os.Open(credentialsFile)
 	if err != nil {
@@ -58,8 +58,8 @@ func NewDrive(ctx context.Context, parentID string) (*Drive, error) {
 		return nil, err
 	}
 	return &Drive{
-		service:  driveService,
-		parentID: parentID,
+		service: driveService,
+		driveID: driveID,
 	}, nil
 }
 
@@ -117,7 +117,7 @@ func (d *Drive) FindOrCreateFolder(ctx context.Context, path string) (*drive.Fil
 		newFolder := &drive.File{
 			Name:     path,
 			MimeType: "application/vnd.google-apps.folder",
-			Parents:  []string{d.parentID},
+			Parents:  []string{d.driveID},
 		}
 		createdFolder, err := d.service.Files.Create(newFolder).SupportsAllDrives(true).Do()
 		if err != nil {
@@ -182,7 +182,7 @@ func (d *Drive) DeleteAllFiles(ctx context.Context) error {
 	}
 
 	for _, file := range files.Files {
-		if file.Id == d.parentID { // ignore parent ID
+		if file.Id == d.driveID { // ignore parent ID
 			continue
 		}
 		select {
@@ -247,9 +247,9 @@ func (d *Drive) DownloadFile(ctx context.Context, id string) (io.ReadCloser, err
 func (d *Drive) UploadFile(ctx context.Context, metadata *drive.File, reader io.Reader) error {
 	// log.Printf("Uploading file with ID: : %s", record.ID)
 	if len(metadata.Parents) == 0 {
-		metadata.Parents = []string{d.parentID} // ensure root directory is always the root parent id if unset
+		metadata.Parents = []string{d.driveID} // ensure root directory is always the root parent id if unset
 	}
-	res, err := d.service.Files.Create(metadata).Media(reader).Do()
+	res, err := d.service.Files.Create(metadata).Media(reader).SupportsAllDrives(true).Do()
 	if err != nil {
 		b, _ := json.MarshalIndent(metadata, " ", " ")
 		return fmt.Errorf("Error creating file: %s: %w", string(b), err)
