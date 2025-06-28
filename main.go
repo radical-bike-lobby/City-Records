@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -19,7 +20,8 @@ import (
 )
 
 const (
-	securePrefix = "19xYG2-JL-onVDe01kDQUgtu5eG9HHLIG"
+	securePrefix   = "19xYG2-JL-onVDe01kDQUgtu5eG9HHLIG"
+	sharedFolderID = "1z_WnsINGZxcoPoKWv7qlxyrjgMcbSRHo"
 
 	numWorkers = 5
 )
@@ -50,15 +52,30 @@ var (
 )
 
 var client = &http.Client{}
+var driveService *Drive
+var failedRecords sync.Map
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	for k, v := range ignoredIds {
+		failedRecords.Store(k, v)
+	}
+}
+
+func cleanup() {
+	log.Printf("Cleaning up...")
+	log.Printf("Uploading failed files:")
+
+	// err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
 }
 
 func main() {
 	ctx := context.Background()
 
-	driveService, err := NewDrive(ctx)
+	var err error
+
+	driveService, err = NewDrive(ctx, sharedFolderID)
 
 	if err != nil {
 		log.Println("Error initializing drive service:", err)
@@ -107,7 +124,7 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 			for record := range tasks {
 				err := transferRecord(gctx, driveService, record)
 				if err != nil {
-					return err
+					failedRecords.Store(record.ID, err.Error())
 				}
 			}
 			return nil
@@ -126,6 +143,10 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 	}
 
 	for _, record := range records.Data {
+		if _, ignore := failedRecords.Load(record.ID); ignore {
+			log.Printf("Ignoring ID: %s", record.ID)
+			continue
+		}
 		count += 1
 		record.ParentId = folder.Id
 		if _, ok := currentFileIDs[record.ID]; ok {
@@ -146,15 +167,13 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 func transferRecord(ctx context.Context, driveService *Drive, record *Record) error {
 	body, err := fetchDocument(ctx, record.ID)
 	if err != nil {
-		log.Println("Error fetching document :", err)
-		return err
+		return fmt.Errorf("Error fetching document: %w", err)
 	}
 	defer body.Close()
 
 	err = driveService.UploadRecord(ctx, record, body)
 	if err != nil {
-		log.Println("Error uploading document :", err)
-		return err
+		return fmt.Errorf("Error uploading document: %w", err)
 	}
 
 	return nil
@@ -289,8 +308,8 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 
 }
 
-func fetchDocument(ctx context.Context, id string) (io.ReadCloser, error) {
-	id = url.QueryEscape(id)
+func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, error) {
+	id := url.QueryEscape(origID)
 	url := "https://records.cityofberkeley.info/PublicAccess/api/Document/" + id + "/"
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
@@ -304,7 +323,7 @@ func fetchDocument(ctx context.Context, id string) (io.ReadCloser, error) {
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
-		log.Printf("Document fetch request for: %s failed with status code:  %d. Body: %s", id, resp.StatusCode, string(body))
+		log.Printf("Document fetch request for: %s failed with status code:  %d. Body: %s", origID, resp.StatusCode, string(body))
 		return nil, err
 	}
 

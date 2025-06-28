@@ -11,39 +11,55 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/oauth2/google"
 	"golang.org/x/sync/errgroup"
 	drive "google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
 
-const (
-	file = "/Users/navgattu/Downloads/prismatic-fact-96623-19438c8ca24b.json"
-)
+var credentialsFile = os.Getenv("CREDENTIALS_FILE")
+var userToImpersonate = os.Getenv("IMPERSONATE_SUBJECT")
 
 type Drive struct {
-	service *drive.Service
+	service  *drive.Service
+	parentID string
 }
 
 // NewDrive creates a new drive service
-func NewDrive(ctx context.Context) (*Drive, error) {
+func NewDrive(ctx context.Context, parentID string) (*Drive, error) {
 
-	file, err := os.Open(file)
+	file, err := os.Open(credentialsFile)
 	if err != nil {
-		log.Fatalf("Error opening file: %v", err)
+		return nil, fmt.Errorf("Error opening file: %s, %v", credentialsFile, err)
 	}
 	defer file.Close()
 
 	content, err := io.ReadAll(file)
 	if err != nil {
-		log.Fatalf("Error reading file: %v", err)
+		return nil, fmt.Errorf("Error reading file: %s, %v", credentialsFile, err)
+
 	}
-	driveService, err := drive.NewService(ctx, option.WithCredentialsJSON(content))
+
+	jwtConfig, err := google.JWTConfigFromJSON(
+		[]byte(content),
+		drive.DriveScope, // Or other necessary Drive API scopes
+	)
+	if err != nil {
+		log.Fatalf("Error creating JWT config: %v", err)
+	}
+
+	jwtConfig.Subject = userToImpersonate
+	// Create a new HTTP client with the configured JWT credentials
+	client := jwtConfig.Client(ctx)
+
+	driveService, err := drive.NewService(ctx, option.WithHTTPClient(client))
 
 	if err != nil {
 		return nil, err
 	}
 	return &Drive{
-		service: driveService,
+		service:  driveService,
+		parentID: parentID,
 	}, nil
 }
 
@@ -101,8 +117,9 @@ func (d *Drive) FindOrCreateFolder(ctx context.Context, path string) (*drive.Fil
 		newFolder := &drive.File{
 			Name:     path,
 			MimeType: "application/vnd.google-apps.folder",
+			Parents:  []string{d.parentID},
 		}
-		createdFolder, err := d.service.Files.Create(newFolder).Do()
+		createdFolder, err := d.service.Files.Create(newFolder).SupportsAllDrives(true).Do()
 		if err != nil {
 			return nil, fmt.Errorf("Error listing creating folder for query: %s: %w", query, err)
 		}
@@ -114,6 +131,8 @@ func (d *Drive) FindOrCreateFolder(ctx context.Context, path string) (*drive.Fil
 func (d *Drive) List(ctx context.Context, filter ...string) (*drive.FileList, error) {
 
 	query := d.service.Files.List().PageSize(1000).
+		IncludeItemsFromAllDrives(true).
+		SupportsAllDrives(true).
 		Fields("nextPageToken, files(id, name, createdTime, modifiedTime, properties, appProperties, parents, size)")
 
 	if len(filter) > 0 {
@@ -163,6 +182,9 @@ func (d *Drive) DeleteAllFiles(ctx context.Context) error {
 	}
 
 	for _, file := range files.Files {
+		if file.Id == d.parentID { // ignore parent ID
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -181,7 +203,10 @@ func (d *Drive) ListRecordIds(ctx context.Context) (map[string]string, error) {
 	pageToken := ""
 
 	for {
-		call := d.service.Files.List().Fields("nextPageToken, files(id, name, properties)")
+		call := d.service.Files.List().
+			SupportsAllDrives(true).
+			IncludeItemsFromAllDrives(true).
+			Fields("nextPageToken, files(id, name, properties)")
 		if pageToken != "" {
 			call = call.PageToken(pageToken)
 		}
@@ -221,6 +246,9 @@ func (d *Drive) DownloadFile(ctx context.Context, id string) (io.ReadCloser, err
 
 func (d *Drive) UploadFile(ctx context.Context, metadata *drive.File, reader io.Reader) error {
 	// log.Printf("Uploading file with ID: : %s", record.ID)
+	if len(metadata.Parents) == 0 {
+		metadata.Parents = []string{d.parentID} // ensure root directory is always the root parent id if unset
+	}
 	res, err := d.service.Files.Create(metadata).Media(reader).Do()
 	if err != nil {
 		b, _ := json.MarshalIndent(metadata, " ", " ")
