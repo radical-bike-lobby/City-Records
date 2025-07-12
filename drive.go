@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"strings"
-	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/oauth2/google"
@@ -19,6 +19,10 @@ import (
 
 var credentialsFile = os.Getenv("CREDENTIALS_FILE")
 var userToImpersonate = os.Getenv("IMPERSONATE_SUBJECT")
+
+const (
+	fields = "id, name, createdTime, modifiedTime, properties, parents, size, sha256Checksum"
+)
 
 type Drive struct {
 	service *drive.Service
@@ -87,8 +91,8 @@ func (d *Drive) FindFileByProperty(ctx context.Context, key string, value string
 		return nil, err
 	}
 
-	if len(files.Files) > 0 {
-		return files.Files[0], nil
+	if len(files) > 0 {
+		return files[0], nil
 	}
 
 	return nil, nil
@@ -100,8 +104,8 @@ func (d *Drive) FindRecord(ctx context.Context, id string) (*drive.File, error) 
 		return nil, err
 	}
 
-	if len(files.Files) > 0 {
-		return files.Files[0], nil
+	if len(files) > 0 {
+		return files[0], nil
 	}
 
 	return nil, nil
@@ -113,7 +117,7 @@ func (d *Drive) FindOrCreateFolder(ctx context.Context, path string) (*drive.Fil
 	if err != nil {
 		return nil, fmt.Errorf("Error listing files for query: %s: %w", query, err)
 	}
-	if len(files.Files) == 0 {
+	if len(files) == 0 {
 		newFolder := &drive.File{
 			Name:     path,
 			MimeType: "application/vnd.google-apps.folder",
@@ -125,24 +129,45 @@ func (d *Drive) FindOrCreateFolder(ctx context.Context, path string) (*drive.Fil
 		}
 		return createdFolder, nil
 	}
-	return files.Files[0], nil
+	return files[0], nil
 }
 
-func (d *Drive) List(ctx context.Context, filter ...string) (*drive.FileList, error) {
+func (d *Drive) List(ctx context.Context, query ...string) (files []*drive.File, err error) {
 
-	query := d.service.Files.List().PageSize(1000).
+	pageToken := ""
+	call := d.service.Files.List().PageSize(1000).
 		IncludeItemsFromAllDrives(true).
 		SupportsAllDrives(true).
-		Fields("nextPageToken, files(id, name, createdTime, modifiedTime, properties, appProperties, parents, size)")
-
-	if len(filter) > 0 {
-		query = query.Q(filter[0])
+		Fields("nextPageToken, files(" + fields + ")")
+	if len(query) > 0 {
+		call = call.Q(query[0])
 	}
 
-	return query.Do()
+	for {
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		fmt.Println("before")
+		list, err := call.Do()
+		fmt.Println("after")
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, list.Files...)
+
+		pageToken = list.NextPageToken
+		if pageToken == "" {
+			break // No more pages
+		}
+
+	}
+
+	return files, err
 }
 
 func (d *Drive) PrintAllFiles(ctx context.Context) error {
+	fmt.Println("Printing files.")
 	files, err := d.List(ctx)
 	if err != nil {
 		return err
@@ -165,7 +190,7 @@ func (d *Drive) DeleteAllFiles(ctx context.Context) error {
 		return err
 	}
 
-	log.Printf("Deleting %d files", len(files.Files))
+	log.Printf("Deleting %d files", len(files))
 	group, gctx := errgroup.WithContext(ctx)
 	tasks := make(chan *drive.File)
 
@@ -181,7 +206,7 @@ func (d *Drive) DeleteAllFiles(ctx context.Context) error {
 		})
 	}
 
-	for _, file := range files.Files {
+	for _, file := range files {
 		if file.Id == d.driveID { // ignore parent ID
 			continue
 		}
@@ -207,6 +232,7 @@ func (d *Drive) ListRecordIds(ctx context.Context) (map[string]string, error) {
 			SupportsAllDrives(true).
 			IncludeItemsFromAllDrives(true).
 			Fields("nextPageToken, files(id, name, properties)")
+
 		if pageToken != "" {
 			call = call.PageToken(pageToken)
 		}
@@ -244,66 +270,97 @@ func (d *Drive) DownloadFile(ctx context.Context, id string) (io.ReadCloser, err
 	return resp.Body, nil
 }
 
-func (d *Drive) UploadFile(ctx context.Context, metadata *drive.File, reader io.Reader) error {
+func (d *Drive) UploadFile(ctx context.Context, metadata *drive.File, reader io.Reader) (*drive.File, error) {
 	// log.Printf("Uploading file with ID: : %s", record.ID)
 	if len(metadata.Parents) == 0 {
 		metadata.Parents = []string{d.driveID} // ensure root directory is always the root parent id if unset
 	}
-	res, err := d.service.Files.Create(metadata).Media(reader).SupportsAllDrives(true).Do()
+	res, err := d.service.Files.Create(metadata).
+		Media(reader).
+		SupportsAllDrives(true).
+		Fields(fields).
+		Do()
+
 	if err != nil {
 		b, _ := json.MarshalIndent(metadata, " ", " ")
-		return fmt.Errorf("Error creating file: %s: %w", string(b), err)
+		return nil, fmt.Errorf("Error creating file: %s: %w", string(b), err)
 	}
 
 	b, err := json.Marshal(res)
 	if err != nil {
-		return fmt.Errorf("Error marshalling body for file: %s: %w", metadata.Name, err)
+		return nil, fmt.Errorf("Error marshalling body for file: %s: %w", metadata.Name, err)
 	}
 	log.Printf("File uploaded successfully. Resp: %v", string(b))
-	return nil
+	return res, nil
 }
 
 func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Reader) error {
 
-	log.Println("Uploading record: ", record.ID)
-	if file, err := d.FindRecord(ctx, record.ID); err != nil {
+	file, err := d.FindRecord(ctx, record.ID)
+
+	if err != nil {
 		return err
 	} else if file != nil {
 		log.Printf("File already exists with ID: %s", record.ID)
 		return nil
 	}
 
-	name := strings.TrimSpace(record.DocName())
-	date, err := record.DocDate()
+	metadata, err := record.ToDriveFile()
+	if err != nil {
+		return err
+	}
+
+	parents := metadata.Parents
+	metadata.Parents = []string{"appDataFolder"}
+
+	// compute sha256 on stream
+	hasher := sha256.New()
+	teeReader := io.TeeReader(reader, hasher)
+
+	// upload file to temporary appDataFolder folder
+	file, err = d.UploadFile(ctx, metadata, teeReader)
+	if err != nil {
+		return err
+	}
+
+	// delete temp file if not successful
+	successful := false
+	defer func() {
+		if successful {
+			return
+		}
+		derr := d.Delete(ctx, file.Id)
+		if derr != nil {
+			fmt.Printf("Error cleaning up temp file: %s", derr.Error())
+		}
+	}()
+
+	sum := hasher.Sum(nil)
+	hash := hex.EncodeToString(sum)
+
+	// dedupe
+	files, err := d.List(ctx, fmt.Sprintf("properties has { key='hash' and value='%s' }", hash))
+	if err != nil {
+		return err
+	}
+
+	if len(files) > 0 {
+		log.Printf("File already exists with ID: %s and hash: %s", file.Id, hash)
+		return nil
+	}
+
+	// move file to final destination and update hash field
+	_, err = d.service.Files.Update(file.Id, &drive.File{
+		Parents: parents,
+		Properties: map[string]string{
+			"hash": hash,
+		},
+	}).Do()
 
 	if err != nil {
-		date = time.Now()
-		b, _ := json.MarshalIndent(record, " ", " ")
-		fmt.Println(string(b))
-		b, _ = json.MarshalIndent(record.DisplayColumns, " ", " ")
-		fmt.Println(string(b))
-		return fmt.Errorf("Error fetching CreatedDate from record: %s, err: %w", record.ID, err)
-
+		return err
 	}
 
-	created := date.Format(time.RFC3339)
-	metadata := &drive.File{
-		Name:         name,
-		CreatedTime:  created,
-		ModifiedTime: created,
-	}
-
-	metadata.Properties = map[string]string{}
-	for key, value := range record.Properties() {
-		fKey, fValue := propertyKeyValue(key, value)
-		metadata.Properties[fKey] = fValue
-	}
-	metadata.Properties["record_id"] = record.ID
-	metadata.Properties["record_type"] = fmt.Sprintf("%d", record.Type)
-
-	if record.ParentId != "" {
-		metadata.Parents = []string{record.ParentId}
-	}
-
-	return d.UploadFile(ctx, metadata, reader)
+	successful = true
+	return nil
 }

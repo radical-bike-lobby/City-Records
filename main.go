@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,8 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -113,19 +112,24 @@ func main() {
 	// 	return
 	// }
 
-	// driveService.PrintAllFiles(ctx)
+	driveService.PrintAllFiles(ctx)
 	driveService.About(ctx)
 
-	fileIDs, err := driveService.ListRecordIds(ctx)
+	files, err := driveService.List(ctx)
 	if err != nil {
 		log.Println("Error listing files:", err)
 		return
 	}
 
+	fileMap := NewDriveFileMap(files)
+
+	// b, _ := json.MarshalIndent(fileMap, " ", " ")
+	// log.Println(string(b))
+
 	group, gctx := errgroup.WithContext(ctx)
 	for id, name := range recordTypeMap {
 		group.Go(func() error {
-			count, err := syncRecords(gctx, driveService, id, fileIDs)
+			count, err := syncRecords(gctx, driveService, id, fileMap)
 			if err != nil {
 				return err
 			}
@@ -145,7 +149,9 @@ func main() {
 }
 
 // syncRecords syncs all records of recordType from the city repository to Drive
-func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType, currentFileIDs map[string]string) (int64, error) {
+func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType, currentFiles *DriveFileMap) (int64, error) {
+
+	// log.Printf("Syncing records for recordType: %v", recordType)
 	count := int64(0)
 
 	group, gctx := errgroup.WithContext(ctx)
@@ -154,9 +160,26 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 	for i := 0; i < numWorkers; i++ {
 		group.Go(func() error {
 			for record := range tasks {
-				err := transferRecord(gctx, driveService, record)
-				if err != nil {
+
+				if files, err := currentFiles.Get(record); err != nil {
+					b, _ := json.MarshalIndent(record, " ", " ")
+					log.Printf("%s\n%s", err, string(b))
 					failedRecords.Store(record.ID, err.Error())
+					return err
+				} else if len(files) > 0 {
+					log.Printf("File exists: %s in folder: %s", record.DocName(), record.ParentId)
+					continue
+				}
+
+				err := transferRecord(gctx, driveService, record)
+				switch {
+				case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+					return err
+				default:
+					b, _ := json.MarshalIndent(record, " ", " ")
+					log.Printf("%s\n%s", err, string(b))
+					failedRecords.Store(record.ID, err.Error())
+					continue
 				}
 			}
 			return nil
@@ -181,9 +204,6 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 		}
 		count += 1
 		record.ParentId = folder.Id
-		if _, ok := currentFileIDs[record.ID]; ok {
-			continue
-		}
 
 		select {
 		case <-ctx.Done():
@@ -203,10 +223,10 @@ func transferRecord(ctx context.Context, driveService *Drive, record *Record) er
 	}
 	defer body.Close()
 
-	err = driveService.UploadRecord(ctx, record, body)
-	if err != nil {
-		return fmt.Errorf("Error uploading document: %w", err)
-	}
+	// err = driveService.UploadRecord(ctx, record, body)
+	// if err != nil {
+	// 	return fmt.Errorf("Error uploading document: %w", err)
+	// }
 
 	return nil
 }
@@ -237,6 +257,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 
 	name := recordTypeMap[queryID]
 	key, _ := propertyKeyValue(name, "")
+	fmt.Println("Fetching records for type: ", name)
 
 	recordID := fmt.Sprintf("%s:%s:%d", driveID, key, queryID)
 
@@ -314,7 +335,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 
 	// Check the response status code
 	if resp.StatusCode != http.StatusOK {
-		fmt.Println("Records fetch request failed with status code:  %d. Body: %s", resp.StatusCode, string(body))
+		fmt.Printf("Records fetch request failed with status code:  %d. Body: %s", resp.StatusCode, string(body))
 		return nil, err
 	}
 
@@ -325,7 +346,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 			"record_id": recordID,
 		},
 	}
-	err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
+	_, err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("Error uploading records: %s: %w", recordID, err)
 	}
@@ -348,8 +369,7 @@ func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error sending request for Document id: %s: %v", id, err)
-		return nil, err
+		return nil, fmt.Errorf("Error sending request for Document id: %s: %w", id, err)
 	}
 	// Check the response status code
 	if resp.StatusCode != http.StatusOK {
@@ -360,124 +380,4 @@ func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, error) {
 	}
 
 	return resp.Body, nil
-}
-
-type Record struct {
-	ID                  string
-	Type                RecordType `json:"-"` // This field will be ignored
-	Name                string
-	DisplayType         string
-	DisplayColumnValues []DisplayColumnValue
-	DisplayColumns      []DisplayColumn `json:"-"` // This field will be ignored
-	ParentId            string
-	Summary             string
-}
-
-func (r *Record) Merge(fixed Record) {
-
-	if fixed.Name != "" {
-		r.Name = fixed.Name
-	}
-	if len(r.DisplayColumnValues) != len(fixed.DisplayColumnValues) {
-		return
-	}
-
-	for i, column := range fixed.DisplayColumnValues {
-		if column.Value != "" {
-			r.DisplayColumnValues[i].Value = column.Value
-		}
-		if column.RawValue != "" {
-			r.DisplayColumnValues[i].RawValue = column.RawValue
-		}
-	}
-}
-
-func (r Record) Properties() map[string]string {
-	m := map[string]string{}
-	for i, column := range r.DisplayColumns {
-		if column.Heading == "" {
-			continue
-		}
-		m[column.Heading] = r.DisplayColumnValues[i].Value
-	}
-	return m
-}
-
-func (r Record) DocDate() (time.Time, error) {
-
-	value, rawValue := r.fromDisplayType("date")
-	if rawValue == "" && value == "" {
-		return time.Time{}, fmt.Errorf("Date columns are empty")
-	}
-	millis, err := strconv.ParseInt(rawValue, 10, 64)
-	if err != nil {
-		return time.Parse("1/_2/2006", value)
-	}
-	return time.UnixMilli(millis), nil
-}
-
-func (r Record) DocSource() string {
-	value, rawValue := r.fromDisplayHeading("doc source")
-	if value == "" || value == "null" {
-		return rawValue
-	}
-	return value
-}
-
-func (r Record) DocName() string {
-	value, rawValue := r.fromDisplayHeading("doc name")
-	switch {
-	case value != "" && value != "null":
-		return value
-	case rawValue != "" && rawValue != "null":
-		return rawValue
-	default:
-		return r.Name
-	}
-}
-
-func (r Record) MeetingType() string {
-	value, rawValue := r.fromDisplayHeading("meeting type")
-	if value == "" || value == "null" {
-		return rawValue
-	}
-	return value
-}
-
-func (r Record) fromDisplayType(_type string) (string, string) {
-	for i, column := range r.DisplayColumns {
-		if strings.ToLower(column.DataType) == strings.ToLower(_type) {
-			value := r.DisplayColumnValues[i].Value
-			rawValue := r.DisplayColumnValues[i].RawValue
-			return value, rawValue
-		}
-	}
-	return "", ""
-}
-
-func (r Record) fromDisplayHeading(name string) (string, string) {
-	for i, column := range r.DisplayColumns {
-		if strings.ToLower(column.Heading) == strings.ToLower(name) {
-			value := r.DisplayColumnValues[i].Value
-			rawValue := r.DisplayColumnValues[i].RawValue
-			return value, rawValue
-		}
-	}
-	return "", ""
-}
-
-type Records struct {
-	Data           []*Record
-	Truncated      bool
-	DisplayColumns []DisplayColumn
-}
-
-type DisplayColumn struct {
-	Heading  string
-	DataType string
-}
-
-type DisplayColumnValue struct {
-	Value    string
-	RawValue string
 }
