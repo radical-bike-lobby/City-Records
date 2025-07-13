@@ -12,6 +12,7 @@ import (
 func TestNewDriveFileMap(t *testing.T) {
 	// Sample drive.File objects for testing
 	now := time.Now().Format(time.RFC3339)
+	date := time.Now().Format(dateFormat)
 	file1 := &drive.File{Id: "file1", Name: "document.docx", Parents: []string{"folder1"}, CreatedTime: now}
 	file2 := &drive.File{Id: "file2", Name: "image.png", Parents: []string{"folder1", "folder2"}, CreatedTime: now}
 	file3 := &drive.File{Id: "file3", Name: "presentation.pptx", Parents: []string{"folder2"}, CreatedTime: now}
@@ -39,7 +40,7 @@ func TestNewDriveFileMap(t *testing.T) {
 			expectedMap: DriveFileMap{
 				FileMap: map[DriveFolderID]map[string][]*drive.File{
 					"folder1": {
-						now: {file1},
+						date: {file1},
 					},
 				},
 			},
@@ -52,7 +53,7 @@ func TestNewDriveFileMap(t *testing.T) {
 			expectedMap: DriveFileMap{
 				FileMap: map[DriveFolderID]map[string][]*drive.File{
 					"folder1": {
-						now: {file1, file4},
+						date: {file1, file4},
 					},
 				},
 			},
@@ -65,10 +66,10 @@ func TestNewDriveFileMap(t *testing.T) {
 			expectedMap: DriveFileMap{
 				FileMap: map[DriveFolderID]map[string][]*drive.File{
 					"folder1": {
-						now: {file1, file2}, // Note: file2 is in both folder1 and folder2
+						date: {file1, file2}, // Note: file2 is in both folder1 and folder2
 					},
 					"folder2": {
-						now: {file2, file3},
+						date: {file2, file3},
 					},
 				},
 			},
@@ -82,7 +83,7 @@ func TestNewDriveFileMap(t *testing.T) {
 			expectedMap: DriveFileMap{
 				FileMap: map[DriveFolderID]map[string][]*drive.File{
 					"folder1": {
-						now: {file1},
+						date: {file1},
 					},
 				},
 			},
@@ -115,6 +116,8 @@ func TestDriveFileMap_Get(t *testing.T) {
 	// Initialize DriveFileMap for testing
 	dfm := NewDriveFileMap([]*drive.File{file1, file2, file3, file4})
 
+	// b, _ := json.MarshalIndent(dfm, " ", " ")
+	// log.Println(string(b))
 	tests := []struct {
 		name          string
 		inputRecord   *Record
@@ -165,9 +168,9 @@ func TestDriveFileMap_Get(t *testing.T) {
 		},
 		{
 			name:          "Record DocDate() returns error",
-			inputRecord:   NewRecord("document.docx", "", now),
+			inputRecord:   &Record{},
 			expectedFiles: nil,
-			expectedErr:   fmt.Errorf("error getting document date"),
+			expectedErr:   fmt.Errorf("Could not find date column"),
 		},
 	}
 

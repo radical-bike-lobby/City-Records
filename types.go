@@ -3,11 +3,16 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
 
 	drive "google.golang.org/api/drive/v3"
+)
+
+const (
+	dateFormat = "1/_2/2006"
 )
 
 type Record struct {
@@ -32,7 +37,7 @@ func NewRecord(name, parent string, date time.Time) *Record {
 		},
 		DisplayColumnValues: []DisplayColumnValue{
 			{
-				Value: date.Format("1/_2/2006"),
+				Value: date.Format(dateFormat),
 			},
 		},
 	}
@@ -177,13 +182,19 @@ func NewDriveFileMap(files []*drive.File) *DriveFileMap {
 	fileMap := make(map[DriveFolderID]map[string][]*drive.File)
 	for _, file := range files {
 
+		createdTime, err := time.Parse(time.RFC3339, file.CreatedTime)
+		if err != nil {
+			log.Fatalf("Invalid date time for file: %s", createdTime)
+		}
+		date := createdTime.Format(dateFormat)
 		for _, parent := range file.Parents {
 			dayMap, ok := fileMap[DriveFolderID(parent)]
 			if !ok {
 				dayMap = map[string][]*drive.File{}
 				fileMap[DriveFolderID(parent)] = dayMap
 			}
-			dayMap[file.CreatedTime] = append(dayMap[file.CreatedTime], file)
+
+			dayMap[date] = append(dayMap[date], file)
 		}
 	}
 
@@ -198,7 +209,7 @@ func (d *DriveFileMap) Get(record *Record) (files []*drive.File, err error) {
 	if err != nil {
 		return nil, err
 	}
-	name, folder, date := record.DocName(), record.ParentId, dt.Format(time.RFC3339)
+	name, folder, date := record.DocName(), record.ParentId, dt.Format(dateFormat)
 	name = strings.ToLower(strings.TrimSpace(name))
 	if dayMap, ok := d.FileMap[DriveFolderID(folder)]; ok {
 		for _, file := range dayMap[date] {
@@ -207,7 +218,6 @@ func (d *DriveFileMap) Get(record *Record) (files []*drive.File, err error) {
 			if filename != name {
 				continue
 			}
-			fmt.Println(filename)
 			files = append(files, file)
 		}
 	}
