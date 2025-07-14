@@ -46,7 +46,8 @@ func NewDrive(ctx context.Context, driveID string) (*Drive, error) {
 
 	jwtConfig, err := google.JWTConfigFromJSON(
 		[]byte(content),
-		drive.DriveScope, // Or other necessary Drive API scopes
+		drive.DriveScope,
+		drive.DriveAppdataScope,
 	)
 	if err != nil {
 		log.Fatalf("Error creating JWT config: %v", err)
@@ -111,15 +112,15 @@ func (d *Drive) FindRecord(ctx context.Context, id string) (*drive.File, error) 
 	return nil, nil
 }
 
-func (d *Drive) FindOrCreateFolder(ctx context.Context, path string) (*drive.File, error) {
-	query := "name='" + path + "' and mimeType='application/vnd.google-apps.folder'"
-	files, err := d.List(ctx, query)
+func (d *Drive) FindOrCreateFolder(ctx context.Context, dirname, parentID string) (*drive.File, error) {
+	query := "name='" + dirname + "' and mimeType='application/vnd.google-apps.folder'"
+	files, err := d.List(ctx, query, fmt.Sprintf("'%s' in parents", parentID))
 	if err != nil {
 		return nil, fmt.Errorf("Error listing files for query: %s: %w", query, err)
 	}
 	if len(files) == 0 {
 		newFolder := &drive.File{
-			Name:     path,
+			Name:     dirname,
 			MimeType: "application/vnd.google-apps.folder",
 			Parents:  []string{d.driveID},
 		}
@@ -148,9 +149,8 @@ func (d *Drive) List(ctx context.Context, query ...string) (files []*drive.File,
 			call = call.PageToken(pageToken)
 		}
 
-		fmt.Println("before")
 		list, err := call.Do()
-		fmt.Println("after")
+
 		if err != nil {
 			return nil, err
 		}
@@ -179,7 +179,9 @@ func (d *Drive) PrintAllFiles(ctx context.Context) error {
 
 func (d *Drive) Delete(ctx context.Context, id string) error {
 	log.Printf("Deleting file with ID: : %s", id)
-	return d.service.Files.Delete(id).Do()
+	return d.service.Files.Delete(id).
+		SupportsAllDrives(true).
+		Do()
 }
 
 func (d *Drive) DeleteAllFiles(ctx context.Context) error {
@@ -294,14 +296,14 @@ func (d *Drive) UploadFile(ctx context.Context, metadata *drive.File, reader io.
 	return res, nil
 }
 
-func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Reader) error {
+func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Reader, length int64) error {
 
 	file, err := d.FindRecord(ctx, record.ID)
 
 	if err != nil {
 		return err
 	} else if file != nil {
-		log.Printf("File already exists with ID: %s", record.ID)
+		log.Printf("File already exists with ID: %s and name %s", record.ID, record.Name)
 		return nil
 	}
 
@@ -310,14 +312,11 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 		return err
 	}
 
-	parents := metadata.Parents
-	metadata.Parents = []string{"appDataFolder"}
-
 	// compute sha256 on stream
 	hasher := sha256.New()
 	teeReader := io.TeeReader(reader, hasher)
 
-	// upload file to temporary appDataFolder folder
+	// upload file to temporary folder
 	file, err = d.UploadFile(ctx, metadata, teeReader)
 	if err != nil {
 		return err
@@ -351,14 +350,14 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 
 	// move file to final destination and update hash field
 	_, err = d.service.Files.Update(file.Id, &drive.File{
-		Parents: parents,
+		ModifiedTime: file.ModifiedTime,
 		Properties: map[string]string{
 			"hash": hash,
 		},
-	}).Do()
+	}).SupportsAllDrives(true).Do()
 
 	if err != nil {
-		return err
+		return fmt.Errorf("Erroring moving file from appDataFolder folder: %w", err)
 	}
 
 	successful = true

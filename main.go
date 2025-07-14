@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	numWorkers = 5
+	numWorkers = 1
 
 	SHARED_DRIVE_ID_ENV_VAR = "SHARED_DRIVE_ID"
 )
@@ -106,14 +106,25 @@ func main() {
 		return
 	}
 
+	// cfg := progressbar.DefaultConfig()
+	// cfg.ScreenWriter = os.Stdout
+	// mbar := cfg.NewMultiBarPrefixes(
+	// 	"b1",
+	// 	"longest prefix",
+	// 	"short",
+	// 	"b4",
+	// )
+
 	// err = driveService.DeleteAllFiles(ctx)
 	// if err != nil {
 	// 	fmt.Println(err.Error())
 	// 	return
 	// }
 
-	driveService.PrintAllFiles(ctx)
+	// driveService.PrintAllFiles(ctx)
 	driveService.About(ctx)
+
+	// return
 
 	files, err := driveService.List(ctx)
 	if err != nil {
@@ -126,19 +137,20 @@ func main() {
 	// b, _ := json.MarshalIndent(fileMap, " ", " ")
 	// log.Println(string(b))
 
-	group, gctx := errgroup.WithContext(ctx)
+	// group, gctx := errgroup.WithContext(ctx)
 	for id, name := range recordTypeMap {
-		group.Go(func() error {
-			count, err := syncRecords(gctx, driveService, id, fileMap)
-			if err != nil {
-				return err
-			}
-			log.Printf("sync'd %d files of type: %s", count, name)
-			return nil
-		})
+		// group.Go(func() error {
+		count, err := syncRecords(ctx, driveService, id, fileMap)
+		if err != nil {
+			log.Println("Error syncing records:", err)
+			return
+		}
+		log.Printf("sync'd %d files of type: %s", count, name)
+		return
+		// })
 	}
 
-	err = group.Wait()
+	// err = group.Wait()
 
 	if err != nil {
 		log.Println(err)
@@ -165,23 +177,27 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 					b, _ := json.MarshalIndent(record, " ", " ")
 					log.Printf("%s\n%s", err, string(b))
 					failedRecords.Store(record.ID, err.Error())
-					return err
+					// return err
+					continue
 				} else if len(files) > 0 {
 					log.Printf("File exists: %s in folder: %s", record.DocName(), record.ParentId)
 					continue
 				}
 
 				err := transferRecord(gctx, driveService, record)
+
 				switch {
 				case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 					return err
+				case err == nil:
 				default:
 					b, _ := json.MarshalIndent(record, " ", " ")
-					log.Printf("%s\n%s", err, string(b))
+					log.Printf("%s\n%s", err.Error(), string(b))
 					failedRecords.Store(record.ID, err.Error())
-					continue
 				}
+
 			}
+
 			return nil
 		})
 	}
@@ -192,7 +208,7 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 		return count, fmt.Errorf("Error fetching records for type: %d, %w", recordType, err)
 	}
 
-	folder, err := driveService.FindOrCreateFolder(ctx, name)
+	folder, err := driveService.FindOrCreateFolder(ctx, name, driveID)
 	if err != nil {
 		return count, fmt.Errorf("Error creating folder: %s, %w", name, err)
 	}
@@ -205,28 +221,36 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 		count += 1
 		record.ParentId = folder.Id
 
+		log.Println("Pushing: " + record.Name)
 		select {
 		case <-ctx.Done():
 			return count, ctx.Err()
 		case tasks <- record:
+			log.Println("Pushed: " + record.Name)
 		}
 	}
+
+	close(tasks)
 
 	return count, group.Wait()
 }
 
 // transferRecords iterates the passed in records, downloads from the city records site and uploads to google drive
 func transferRecord(ctx context.Context, driveService *Drive, record *Record) error {
-	body, err := fetchDocument(ctx, record.ID)
+	// log.Printf("Transferring record: %s\n", record.Name)
+	body, length, err := fetchDocument(ctx, record.ID)
 	if err != nil {
 		return fmt.Errorf("Error fetching document: %w", err)
 	}
-	defer body.Close()
+	defer func() {
+		body.Close()
+	}()
 
-	// err = driveService.UploadRecord(ctx, record, body)
-	// if err != nil {
-	// 	return fmt.Errorf("Error uploading document: %w", err)
-	// }
+	err = driveService.UploadRecord(ctx, record, body, length)
+	if err != nil {
+		return fmt.Errorf("Error uploading document: %w", err)
+	}
+	// log.Printf("Done transfering record: %s\n", record.Name)
 
 	return nil
 }
@@ -257,7 +281,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 
 	name := recordTypeMap[queryID]
 	key, _ := propertyKeyValue(name, "")
-	fmt.Println("Fetching records for type: ", name)
+	// fmt.Println("Fetching records for type: ", name)
 
 	recordID := fmt.Sprintf("%s:%s:%d", driveID, key, queryID)
 
@@ -284,7 +308,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 	}
 
 	if reader != nil {
-		fmt.Println("Fetched cached records for type: ", name)
+		// fmt.Println("Fetched cached records for type: ", name)
 		defer reader.Close()
 		decoder := json.NewDecoder(reader)
 		err := decoder.Decode(&data)
@@ -335,7 +359,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 
 	// Check the response status code
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Records fetch request failed with status code:  %d. Body: %s", resp.StatusCode, string(body))
+		fmt.Printf("Records fetch request failed with status code:  %d. Body: %s\n", resp.StatusCode, string(body))
 		return nil, err
 	}
 
@@ -361,7 +385,8 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 
 }
 
-func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, error) {
+func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, int64, error) {
+	// log.Printf("Fetching record id: %s", origID)
 	id := url.QueryEscape(origID)
 	url := "https://records.cityofberkeley.info/PublicAccess/api/Document/" + id + "/"
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -369,15 +394,15 @@ func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Error sending request for Document id: %s: %w", id, err)
+		return nil, 0, fmt.Errorf("Error sending request for Document id: %s: %w", id, err)
 	}
 	// Check the response status code
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		log.Printf("Document fetch request for: %s failed with status code:  %d. Body: %s", origID, resp.StatusCode, string(body))
-		return nil, err
+		return nil, 0, err
 	}
 
-	return resp.Body, nil
+	return resp.Body, resp.ContentLength, nil
 }

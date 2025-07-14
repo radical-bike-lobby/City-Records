@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"reflect"
 	"testing"
@@ -9,14 +11,20 @@ import (
 	drive "google.golang.org/api/drive/v3"
 )
 
+var propertiesFunc = func(n string) map[string]string {
+	return map[string]string{
+		"hash": hex.EncodeToString(sha256.New().Sum([]byte(n))),
+	}
+}
+
 func TestNewDriveFileMap(t *testing.T) {
 	// Sample drive.File objects for testing
 	now := time.Now().Format(time.RFC3339)
 	date := time.Now().Format(dateFormat)
-	file1 := &drive.File{Id: "file1", Name: "document.docx", Parents: []string{"folder1"}, CreatedTime: now}
-	file2 := &drive.File{Id: "file2", Name: "image.png", Parents: []string{"folder1", "folder2"}, CreatedTime: now}
-	file3 := &drive.File{Id: "file3", Name: "presentation.pptx", Parents: []string{"folder2"}, CreatedTime: now}
-	file4 := &drive.File{Id: "file4", Name: "report.pdf", Parents: []string{"folder1"}, CreatedTime: now}
+	file1 := &drive.File{Id: "file1", Name: "document.docx", Parents: []string{"folder1"}, CreatedTime: now, Properties: propertiesFunc("file1")}
+	file2 := &drive.File{Id: "file2", Name: "image.png", Parents: []string{"folder1", "folder2"}, CreatedTime: now, Properties: propertiesFunc("file2")}
+	file3 := &drive.File{Id: "file3", Name: "presentation.pptx", Parents: []string{"folder2"}, CreatedTime: now, Properties: propertiesFunc("file3")}
+	file4 := &drive.File{Id: "file4", Name: "report.pdf", Parents: []string{"folder1"}, CreatedTime: now, Properties: propertiesFunc("file4")}
 
 	tests := []struct {
 		name string
@@ -108,10 +116,10 @@ func TestDriveFileMap_Get(t *testing.T) {
 	yesterday := now.Add(-24 * time.Hour)
 	yesterdayFormatted := yesterday.Format(time.RFC3339)
 
-	file1 := &drive.File{Id: "file1", Name: "Document.docx", Parents: []string{"folder1"}, CreatedTime: nowFormatted}
-	file2 := &drive.File{Id: "file2", Name: "image.png", Parents: []string{"folder1"}, CreatedTime: nowFormatted}
-	file3 := &drive.File{Id: "file3", Name: "Presentation.pptx", Parents: []string{"folder2"}, CreatedTime: yesterdayFormatted}
-	file4 := &drive.File{Id: "file4", Name: "document.docx", Parents: []string{"folder1"}, CreatedTime: nowFormatted} // Duplicate name, same folder, same time
+	file1 := &drive.File{Id: "file1", Name: "Document.docx", Parents: []string{"folder1"}, CreatedTime: nowFormatted, Properties: propertiesFunc("file1")}
+	file2 := &drive.File{Id: "file2", Name: "image.png", Parents: []string{"folder1"}, CreatedTime: nowFormatted, Properties: propertiesFunc("file2")}
+	file3 := &drive.File{Id: "file3", Name: "Presentation.pptx", Parents: []string{"folder2"}, CreatedTime: yesterdayFormatted, Properties: propertiesFunc("file3")}
+	file4 := &drive.File{Id: "file4", Name: "document.docx", Parents: []string{"folder1"}, CreatedTime: nowFormatted, Properties: propertiesFunc("file4")} // Duplicate name, same folder, same time
 
 	// Initialize DriveFileMap for testing
 	dfm := NewDriveFileMap([]*drive.File{file1, file2, file3, file4})

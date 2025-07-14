@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"strconv"
 	"strings"
@@ -106,6 +107,14 @@ func (r Record) DocName() string {
 	}
 }
 
+func (r Record) DocType() string {
+	value, rawValue := r.fromDisplayHeading("document type")
+	if value == "" || value == "null" {
+		return rawValue
+	}
+	return value
+}
+
 func (r Record) MeetingType() string {
 	value, rawValue := r.fromDisplayHeading("meeting type")
 	if value == "" || value == "null" {
@@ -138,6 +147,7 @@ func (r Record) fromDisplayHeading(name string) (string, string) {
 
 func (r Record) ToDriveFile() (*drive.File, error) {
 	name := strings.TrimSpace(r.DocName())
+	name = html.UnescapeString(name)
 	date, err := r.DocDate()
 
 	if err != nil {
@@ -182,6 +192,9 @@ func NewDriveFileMap(files []*drive.File) *DriveFileMap {
 	fileMap := make(map[DriveFolderID]map[string][]*drive.File)
 	for _, file := range files {
 
+		if file.Properties == nil || file.Properties["hash"] == "" { // files without a hash should not be indexed
+			continue
+		}
 		createdTime, err := time.Parse(time.RFC3339, file.CreatedTime)
 		if err != nil {
 			log.Fatalf("Invalid date time for file: %s", createdTime)
@@ -214,11 +227,11 @@ func (d *DriveFileMap) Get(record *Record) (files []*drive.File, err error) {
 	if dayMap, ok := d.FileMap[DriveFolderID(folder)]; ok {
 		for _, file := range dayMap[date] {
 			filename := strings.ToLower(strings.TrimSpace(file.Name))
-
-			if filename != name {
-				continue
+			recordName := strings.ToLower(strings.TrimSpace(record.DocName()))
+			recordID := file.Properties["record_id"]
+			if recordID == record.ID || recordName == filename {
+				files = append(files, file)
 			}
-			files = append(files, file)
 		}
 	}
 	return files, nil
