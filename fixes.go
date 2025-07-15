@@ -23,6 +23,7 @@ var fixedRecords = map[string]Record{
 
 // map of record ids to ignore to the message returned by city records api due to failure
 var ignoredIds = map[string]string{
+	"ARX6Hm1motHKqN9XBW6brÉMmgkmFzzAHKemE8Z5XwRPK9xQOw16XwWÉiNJB1tÁÁOHPÁsYÉmBDPRcAuIDcrd2Bfo=": `500. Body: {"Message":"The format of value '4/26/1983; CLK - Resolution; City Council; 51751; ; Authorizing Allocation of 9th Year Community Development Block Grant Funds to YMCA \"New Light\" Senior Center.pdf' is invalid."}`,
 	// "AduVnsWXoCvHupViNhmqognjxARch0wRÁ5jpÉÁL0dNXÁhRoÁSPyUtheI1UrqkBÉYmt8CakNZhMrmLatqLj4qeYk=": `500. Body: {"Message":"The format of value '10/25/2005; CLK - Agenda Packet (Public); District 6; 0; ; Amending \"By Right\" Residential Additions and Definition of a Story in the Zoning Ordinance.pdf' is invalid."}`,
 	// "AQyVFdak5uemFd9vVl3VxZbTl4AypjT3Ke3afptqnYj5QXKFRKdCKdgNdiL1aCHzpDA8mYwFzazlO7HBmtMwXtc=": `500. Body: {"Message":"The format of value '4/26/1983; CLK - Resolution; City Council; 51751; ; Authorizing Allocation of 9th Year Community Development Block Grant Funds to YMCA \"New Light\" Senior Center.pdf' is invalid."}`,
 	// "AU5O7awJhrmÉjqmCHSr6bbÁRCzQy4ÁAÉSHwKlLZrU2zYUFPH7oGJoEZbÁz14lHFEceLppVrpGXN5AEh75UQP8MI=": `500. Body: {"Message":"The format of value '11/15/2005; CLK - Agenda Packet (Public); Planning and Development; 0; ; Amending \"By Right\"  Residential Additions and Definition of a Story in Zoning Ordinance.pdf' is invalid."}`,

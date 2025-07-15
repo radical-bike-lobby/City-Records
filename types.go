@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -97,14 +96,18 @@ func (r Record) DocSource() string {
 
 func (r Record) DocName() string {
 	value, rawValue := r.fromDisplayHeading("doc name")
-	switch {
-	case value != "" && value != "null":
-		return value
-	case rawValue != "" && rawValue != "null":
+	if value == "" || value == "null" {
 		return rawValue
-	default:
-		return r.Name
 	}
+	return value
+}
+
+func (r Record) DocNumber() string {
+	value, rawValue := r.fromDisplayHeading("doc number")
+	if value == "" || value == "null" {
+		return rawValue
+	}
+	return value
 }
 
 func (r Record) DocType() string {
@@ -146,8 +149,23 @@ func (r Record) fromDisplayHeading(name string) (string, string) {
 }
 
 func (r Record) ToDriveFile() (*drive.File, error) {
-	name := strings.TrimSpace(r.DocName())
-	name = html.UnescapeString(name)
+	name := r.DocName()
+	meeting := r.MeetingType()
+	if name == "" {
+		name = r.DocNumber()
+	}
+	if name == "" {
+		if name = r.DocType(); name != "" {
+			if meeting != "" {
+				name = name + " - " + meeting
+			}
+		}
+	}
+	if name == "" {
+		name = r.Name
+	}
+
+	name = strings.TrimSpace(html.UnescapeString(name))
 	date, err := r.DocDate()
 
 	if err != nil {
@@ -185,30 +203,20 @@ func (r Record) ToDriveFile() (*drive.File, error) {
 type DriveFolderID string
 
 type DriveFileMap struct {
-	FileMap map[DriveFolderID]map[string][]*drive.File
+	FileMap map[string][]*drive.File
 }
 
 func NewDriveFileMap(files []*drive.File) *DriveFileMap {
-	fileMap := make(map[DriveFolderID]map[string][]*drive.File)
+	fileMap := make(map[string][]*drive.File)
 	for _, file := range files {
 
-		if file.Properties == nil || file.Properties["hash"] == "" { // files without a hash should not be indexed
+		hash := file.Properties["hash"]
+		record_id := file.Properties["record_id"]
+		if hash == "" || record_id == "" { // files without a hash should not be indexed
 			continue
 		}
-		createdTime, err := time.Parse(time.RFC3339, file.CreatedTime)
-		if err != nil {
-			log.Fatalf("Invalid date time for file: %s", createdTime)
-		}
-		date := createdTime.Format(dateFormat)
-		for _, parent := range file.Parents {
-			dayMap, ok := fileMap[DriveFolderID(parent)]
-			if !ok {
-				dayMap = map[string][]*drive.File{}
-				fileMap[DriveFolderID(parent)] = dayMap
-			}
 
-			dayMap[date] = append(dayMap[date], file)
-		}
+		fileMap[record_id] = append(fileMap[record_id], file)
 	}
 
 	return &DriveFileMap{
@@ -217,24 +225,7 @@ func NewDriveFileMap(files []*drive.File) *DriveFileMap {
 }
 
 func (d *DriveFileMap) Get(record *Record) (files []*drive.File, err error) {
-
-	dt, err := record.DocDate()
-	if err != nil {
-		return nil, err
-	}
-	name, folder, date := record.DocName(), record.ParentId, dt.Format(dateFormat)
-	name = strings.ToLower(strings.TrimSpace(name))
-	if dayMap, ok := d.FileMap[DriveFolderID(folder)]; ok {
-		for _, file := range dayMap[date] {
-			filename := strings.ToLower(strings.TrimSpace(file.Name))
-			recordName := strings.ToLower(strings.TrimSpace(record.DocName()))
-			recordID := file.Properties["record_id"]
-			if recordID == record.ID || recordName == filename {
-				files = append(files, file)
-			}
-		}
-	}
-	return files, nil
+	return d.FileMap[record.ID], nil
 }
 
 type Records struct {

@@ -9,10 +9,12 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/oauth2/google"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	drive "google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
@@ -21,7 +23,8 @@ var credentialsFile = os.Getenv("CREDENTIALS_FILE")
 var userToImpersonate = os.Getenv("IMPERSONATE_SUBJECT")
 
 const (
-	fields = "id, name, createdTime, modifiedTime, properties, parents, size, sha256Checksum"
+	fields          = "id, name, createdTime, modifiedTime, properties, parents, size, sha256Checksum"
+	appDataFolderID = "appDataFolder"
 )
 
 type Drive struct {
@@ -122,7 +125,7 @@ func (d *Drive) FindOrCreateFolder(ctx context.Context, dirname, parentID string
 		newFolder := &drive.File{
 			Name:     dirname,
 			MimeType: "application/vnd.google-apps.folder",
-			Parents:  []string{d.driveID},
+			Parents:  []string{parentID},
 		}
 		createdFolder, err := d.service.Files.Create(newFolder).SupportsAllDrives(true).Do()
 		if err != nil {
@@ -134,9 +137,13 @@ func (d *Drive) FindOrCreateFolder(ctx context.Context, dirname, parentID string
 }
 
 func (d *Drive) List(ctx context.Context, query ...string) (files []*drive.File, err error) {
+	return d.ListSpace(ctx, "drive", query...)
+}
+
+func (d *Drive) ListSpace(ctx context.Context, space string, query ...string) (files []*drive.File, err error) {
 
 	pageToken := ""
-	call := d.service.Files.List().PageSize(1000).
+	call := d.service.Files.List().Spaces(space).PageSize(1000).
 		IncludeItemsFromAllDrives(true).
 		SupportsAllDrives(true).
 		Fields("nextPageToken, files(" + fields + ")")
@@ -178,7 +185,7 @@ func (d *Drive) PrintAllFiles(ctx context.Context) error {
 }
 
 func (d *Drive) Delete(ctx context.Context, id string) error {
-	log.Printf("Deleting file with ID: : %s", id)
+	// log.Printf("Deleting file with ID: : %s", id)
 	return d.service.Files.Delete(id).
 		SupportsAllDrives(true).
 		Do()
@@ -272,6 +279,18 @@ func (d *Drive) DownloadFile(ctx context.Context, id string) (io.ReadCloser, err
 	return resp.Body, nil
 }
 
+func (d *Drive) MoveFile(ctx context.Context, file *drive.File, folderID string) error {
+	_, err := d.service.Files.Update(file.Id, &drive.File{
+		ModifiedTime: file.ModifiedTime,
+	}).
+		SupportsAllDrives(true).
+		RemoveParents(strings.Join(file.Parents, ",")).
+		AddParents(folderID).
+		Do()
+
+	return err
+}
+
 func (d *Drive) UploadFile(ctx context.Context, metadata *drive.File, reader io.Reader) (*drive.File, error) {
 	// log.Printf("Uploading file with ID: : %s", record.ID)
 	if len(metadata.Parents) == 0 {
@@ -288,11 +307,11 @@ func (d *Drive) UploadFile(ctx context.Context, metadata *drive.File, reader io.
 		return nil, fmt.Errorf("Error creating file: %s: %w", string(b), err)
 	}
 
-	b, err := json.Marshal(res)
-	if err != nil {
-		return nil, fmt.Errorf("Error marshalling body for file: %s: %w", metadata.Name, err)
-	}
-	log.Printf("File uploaded successfully. Resp: %v", string(b))
+	// b, err := json.Marshal(res)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("Error marshalling body for file: %s: %w", metadata.Name, err)
+	// }
+	// log.Printf("File uploaded successfully. Resp: %v", string(b))
 	return res, nil
 }
 
@@ -303,13 +322,22 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 	if err != nil {
 		return err
 	} else if file != nil {
-		log.Printf("File already exists with ID: %s and name %s", record.ID, record.Name)
+		// log.Printf("File already exists with ID: %s and name %s", record.ID, record.Name)
 		return nil
 	}
 
 	metadata, err := record.ToDriveFile()
 	if err != nil {
 		return err
+	}
+
+	if docSource := record.DocSource(); docSource != "" {
+		docSource = cases.Title(language.English).String(docSource)
+		folder, err := d.FindOrCreateFolder(ctx, docSource, record.ParentId)
+		if err != nil {
+			return err
+		}
+		metadata.Parents = []string{folder.Id}
 	}
 
 	// compute sha256 on stream
@@ -344,7 +372,7 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 	}
 
 	if len(files) > 0 {
-		log.Printf("File already exists with ID: %s and hash: %s", file.Id, hash)
+		// log.Printf("File already exists with ID: %s and hash: %s", file.Id, hash)
 		return nil
 	}
 
