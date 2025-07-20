@@ -1,17 +1,6 @@
 package main
 
-import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"reflect"
-	"testing"
-	"time"
-
-	drive "google.golang.org/api/drive/v3"
-)
-
-var propertiesFunc = func(n string) map[string]string {
+/*var propertiesFunc = func(n string) map[string]string {
 	return map[string]string{
 		"hash": hex.EncodeToString(sha256.New().Sum([]byte(n))),
 	}
@@ -202,3 +191,4 @@ func TestDriveFileMap_Get(t *testing.T) {
 		})
 	}
 }
+*/

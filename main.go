@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sync"
 	"syscall"
 
@@ -21,7 +22,7 @@ import (
 )
 
 const (
-	numWorkers = 2
+	numWorkers = 1
 
 	SHARED_DRIVE_ID_ENV_VAR = "SHARED_DRIVE_ID"
 )
@@ -59,32 +60,30 @@ var failedRecords sync.Map
 
 func init() {
 
-	if driveID == "" {
-		log.Fatalf("Missing %s env var", SHARED_DRIVE_ID_ENV_VAR)
-	}
-
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	for k, v := range ignoredIds {
-		failedRecords.Store(k, v)
-	}
 }
 
 func cleanup() {
 	log.Printf("Cleaning up...")
 
+	failed := make(map[string]string)
 	failedRecords.Range(func(k, v interface{}) bool {
-		ignoredIds[k.(string)] = v.(string)
+		failed[k.(string)] = v.(string)
 		return true
 	})
 
-	b, _ := json.MarshalIndent(ignoredIds, " ", " ")
+	b, _ := json.MarshalIndent(failed, " ", " ")
 	log.Printf("Failed records:\n%s", string(b))
 
 	os.Exit(0)
 }
 
 func main() {
+
+	if driveID == "" {
+		log.Fatalf("Missing %s env var", SHARED_DRIVE_ID_ENV_VAR)
+	}
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
@@ -105,29 +104,16 @@ func main() {
 		return
 	}
 
-	// cfg := progressbar.DefaultConfig()
-	// cfg.ScreenWriter = os.Stdout
-	// mbar := cfg.NewMultiBarPrefixes(
-	// 	"b1",
-	// 	"longest prefix",
-	// 	"short",
-	// 	"b4",
-	// )
-
-	driveService.About(ctx)
-
-	files, err := driveService.List(ctx)
-	if err != nil {
-		log.Println("Error listing files:", err)
-		return
-	}
-
-	fileMap := NewDriveFileMap(files)
+	// fileMap, err := buildFileMap(ctx, driveService)
+	// if err != nil {
+	// 	log.Println("Error building filemape:", err)
+	// 	return
+	// }
 
 	// group, gctx := errgroup.WithContext(ctx)
 	for id, name := range recordTypeMap {
 		// group.Go(func() error {
-		count, err := syncRecords(ctx, driveService, id, fileMap)
+		count, err := syncRecords(ctx, driveService, id)
 		if err != nil {
 			log.Println("Error syncing records:", err)
 			return
@@ -146,40 +132,84 @@ func main() {
 
 }
 
+func buildFileMap(ctx context.Context, driveService *Drive) (*DriveFileMap, error) {
+
+	bar := progressbar.Default(
+		int64(-1),
+		fmt.Sprintf("Fetching existing files from Drive"),
+	)
+
+	defer func() {
+		bar.Finish()
+		bar.Exit()
+	}()
+
+	files, err := driveService.ListSpace(ctx, "drive", bar.Add)
+
+	if err != nil {
+		log.Println("Error listing files:", err)
+		return nil, err
+	}
+
+	return NewDriveFileMap(files), nil
+}
+
 // syncRecords syncs all records of recordType from the city repository to Drive
-func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType, currentFiles *DriveFileMap) (int64, error) {
+func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType) (int64, error) {
 
 	// log.Printf("Syncing records for recordType: %v", recordType)
 	count := int64(0)
 
+	// fetch records from drive
 	records, err := fetchRecords(ctx, driveService, recordType)
 	if err != nil {
 		return count, fmt.Errorf("Error fetching records for type: %d, %w", recordType, err)
 	}
 
+	// save records on return
+	defer func() {
+		if count == 0 {
+			return
+		}
+		serr := saveRecords(ctx, records)
+		if serr != nil {
+			fmt.Printf("Error saving records of type: %s: %s", recordTypeMap[recordType], serr.Error())
+		}
+	}()
+
+	var newRecords []*Record
+	for _, record := range records.Data {
+		if record.Persisted {
+			continue
+		}
+		newRecords = append(newRecords, record)
+	}
+
 	name := recordTypeMap[recordType]
 	bar := progressbar.Default(
-		int64(len(records.Data)),
+		int64(len(newRecords)),
 		fmt.Sprintf("Syncing %s", name),
 	)
+
+	defer func() {
+		bar.Finish()
+		bar.Exit()
+	}()
 
 	group, gctx := errgroup.WithContext(ctx)
 	tasks := make(chan *Record)
 
 	for i := 0; i < numWorkers; i++ {
 		group.Go(func() error {
-			for record := range tasks {
 
-				if files, err := currentFiles.Get(record); err != nil {
-					b, _ := json.MarshalIndent(record, " ", " ")
-					log.Printf("%s\n%s", err, string(b))
-					failedRecords.Store(record.ID, err.Error())
-					// return err
-					continue
-				} else if len(files) > 0 {
-					// log.Printf("File exists: %s in folder: %s", record.DocName(), record.ParentId)
-					continue
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Println("Recovered in f", r)
+					log.Printf("%s: %s", r, debug.Stack())
 				}
+			}()
+
+			for record := range tasks {
 
 				err := transferRecord(gctx, driveService, record)
 
@@ -187,6 +217,7 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 				case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 					return err
 				case err == nil:
+					record.Persisted = true
 				default:
 					b, _ := json.MarshalIndent(record, " ", " ")
 					log.Printf("%s\n%s", err.Error(), string(b))
@@ -205,9 +236,10 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 		return count, fmt.Errorf("Error creating folder: %s, %w", name, err)
 	}
 
-	for _, record := range records.Data {
-		if _, ignore := failedRecords.Load(record.ID); ignore {
-			log.Printf("Ignoring ID: %s", record.ID)
+	for _, record := range newRecords {
+		_, ignore := ignoredIds[record.ID]
+		if ignore || record.Persisted {
+			bar.Add(1)
 			continue
 		}
 		count += 1
@@ -254,6 +286,12 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 
 	var data Records
 
+	name := recordTypeMap[queryID]
+	key, _ := propertyKeyValue(name, "")
+	fmt.Println("Fetching records for type: ", name)
+
+	recordID := fmt.Sprintf("%s:%s:%d", driveID, key, queryID)
+
 	// populate each record with the top level DisplayColumns, which
 	// hold information on what individual record display column values hold
 	// see Records type
@@ -265,21 +303,27 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 			record.Type = queryID
 			record.DisplayColumns = data.DisplayColumns
 		}
+
+		data.ID = recordID
+		data.Name = key + ".json"
 	}()
 
 	// Fetch records from google drive first
 	// If the set of records are too old, refetch from city records site
 	var reader io.ReadCloser
 
-	name := recordTypeMap[queryID]
-	key, _ := propertyKeyValue(name, "")
-	// fmt.Println("Fetching records for type: ", name)
-
-	recordID := fmt.Sprintf("%s:%s:%d", driveID, key, queryID)
-
 	query := fmt.Sprintf("properties has { key='record_id' and value='%s' }", recordID)
 
-	files, err := driveService.ListSpace(ctx, appDataFolderID, query)
+	bar := progressbar.Default(
+		int64(-1),
+		fmt.Sprintf("Fetching records for: %s", name),
+	)
+	defer func() {
+		bar.Finish()
+		bar.Exit()
+	}()
+
+	files, err := driveService.ListSpace(ctx, appDataFolderID, bar.Add, query)
 	if err != nil {
 		return nil, fmt.Errorf("Error fetching file: %w", err)
 	}
@@ -384,6 +428,32 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 
 }
 
+// saveRecords persists records, along with any update state (i.e. Persisted), back to Drive
+func saveRecords(ctx context.Context, data *Records) error {
+
+	fmt.Println("Saving records: " + data.Name)
+	body, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("Error marshaling records for persistence: %w", err)
+	}
+
+	file := &drive.File{
+		Name:    data.Name,
+		Parents: []string{appDataFolderID},
+		Properties: map[string]string{
+			"record_id": data.ID,
+		},
+	}
+
+	_, err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("Error saving records: %s: %w", data.ID, err)
+	}
+
+	fmt.Println("Finished saving records: " + data.Name)
+	return nil
+}
+
 func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, int64, error) {
 	// log.Printf("Fetching record id: %s", origID)
 	id := url.QueryEscape(origID)
@@ -398,9 +468,8 @@ func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, int64, er
 	// Check the response status code
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		log.Printf("Document fetch request for: %s failed with status code:  %d. Body: %s", origID, resp.StatusCode, string(body))
-		return nil, 0, err
+		body, _ := io.ReadAll(resp.Body)
+		return nil, 0, fmt.Errorf("Document fetch request for: %s failed with status code:  %d. Body: %s", origID, resp.StatusCode, string(body))
 	}
 
 	return resp.Body, resp.ContentLength, nil

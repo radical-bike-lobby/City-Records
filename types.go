@@ -15,15 +15,62 @@ const (
 	dateFormat = "1/_2/2006"
 )
 
+type DriveFolderID string
+
+type DriveFileMap struct {
+	FileMap map[string][]*drive.File
+}
+
+func NewDriveFileMap(files []*drive.File) *DriveFileMap {
+	fileMap := make(map[string][]*drive.File)
+	for _, file := range files {
+
+		hash := file.Properties["hash"]
+		record_id := file.Properties["record_id"]
+		if hash == "" || record_id == "" { // files without a hash should not be indexed
+			continue
+		}
+
+		fileMap[record_id] = append(fileMap[record_id], file)
+	}
+
+	return &DriveFileMap{
+		FileMap: fileMap,
+	}
+}
+
+func (d *DriveFileMap) Get(record *Record) (files []*drive.File, err error) {
+	return d.FileMap[record.ID], nil
+}
+
 type Record struct {
-	ID                  string
-	Type                RecordType `json:"-"` // This field will be ignored
-	Name                string
-	DisplayType         string
-	DisplayColumnValues []DisplayColumnValue
-	DisplayColumns      []DisplayColumn `json:"-"` // This field will be ignored
-	ParentId            string
-	Summary             string
+	ID                  string               `json:"ID"`
+	Type                RecordType           `json:"-"` // This field will be ignored
+	Name                string               `json:"Name"`
+	DisplayType         string               `json:"DisplayType"`
+	DisplayColumnValues []DisplayColumnValue `json:"DisplayColumnValues"`
+	DisplayColumns      []DisplayColumn      `json:"-"` // This field will be ignored
+	ParentId            string               `json:"-"` // This field will not be persisted
+	Summary             string               `json:"Summary"`
+	Persisted           bool                 `json:"Persisted"` // indicates if the record was persisted successfully to Drive
+}
+
+type Records struct {
+	ID             string          `json:"ID"`
+	Name           string          `json:"Name"`
+	Data           []*Record       `json:"Data"`
+	Truncated      bool            `json:"Truncated"`
+	DisplayColumns []DisplayColumn `json:"DisplayColumns"`
+}
+
+type DisplayColumn struct {
+	Heading  string
+	DataType string
+}
+
+type DisplayColumnValue struct {
+	Value    string
+	RawValue string
 }
 
 func NewRecord(name, parent string, date time.Time) *Record {
@@ -41,6 +88,19 @@ func NewRecord(name, parent string, date time.Time) *Record {
 			},
 		},
 	}
+}
+
+func (r *Record) Equal(other *Record) bool {
+	if r == nil || other == nil {
+		return false
+	}
+
+	if r.ID != "" && r.ID == other.ID {
+		return true
+	}
+
+	return false
+
 }
 
 func (r *Record) Merge(fixed Record) {
@@ -198,48 +258,4 @@ func (r Record) ToDriveFile() (*drive.File, error) {
 	}
 
 	return metadata, nil
-}
-
-type DriveFolderID string
-
-type DriveFileMap struct {
-	FileMap map[string][]*drive.File
-}
-
-func NewDriveFileMap(files []*drive.File) *DriveFileMap {
-	fileMap := make(map[string][]*drive.File)
-	for _, file := range files {
-
-		hash := file.Properties["hash"]
-		record_id := file.Properties["record_id"]
-		if hash == "" || record_id == "" { // files without a hash should not be indexed
-			continue
-		}
-
-		fileMap[record_id] = append(fileMap[record_id], file)
-	}
-
-	return &DriveFileMap{
-		FileMap: fileMap,
-	}
-}
-
-func (d *DriveFileMap) Get(record *Record) (files []*drive.File, err error) {
-	return d.FileMap[record.ID], nil
-}
-
-type Records struct {
-	Data           []*Record
-	Truncated      bool
-	DisplayColumns []DisplayColumn
-}
-
-type DisplayColumn struct {
-	Heading  string
-	DataType string
-}
-
-type DisplayColumnValue struct {
-	Value    string
-	RawValue string
 }

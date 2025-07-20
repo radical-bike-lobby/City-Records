@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/oauth2/google"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	drive "google.golang.org/api/drive/v3"
@@ -25,11 +26,14 @@ var userToImpersonate = os.Getenv("IMPERSONATE_SUBJECT")
 const (
 	fields          = "id, name, createdTime, modifiedTime, properties, parents, size, sha256Checksum"
 	appDataFolderID = "appDataFolder"
+
+	folderMime = "application/vnd.google-apps.folder"
 )
 
 type Drive struct {
 	service *drive.Service
 	driveID string
+	sg      *singleflight.Group
 }
 
 // NewDrive creates a new drive service
@@ -68,6 +72,7 @@ func NewDrive(ctx context.Context, driveID string) (*Drive, error) {
 	return &Drive{
 		service: driveService,
 		driveID: driveID,
+		sg:      &singleflight.Group{},
 	}, nil
 }
 
@@ -115,32 +120,46 @@ func (d *Drive) FindRecord(ctx context.Context, id string) (*drive.File, error) 
 	return nil, nil
 }
 
-func (d *Drive) FindOrCreateFolder(ctx context.Context, dirname, parentID string) (*drive.File, error) {
-	query := "name='" + dirname + "' and mimeType='application/vnd.google-apps.folder'"
-	files, err := d.List(ctx, query, fmt.Sprintf("'%s' in parents", parentID))
-	if err != nil {
-		return nil, fmt.Errorf("Error listing files for query: %s: %w", query, err)
-	}
-	if len(files) == 0 {
-		newFolder := &drive.File{
-			Name:     dirname,
-			MimeType: "application/vnd.google-apps.folder",
-			Parents:  []string{parentID},
-		}
-		createdFolder, err := d.service.Files.Create(newFolder).SupportsAllDrives(true).Do()
+// FindOrCreateFolder locates or creates a specified folder withing a parent folder
+func (d *Drive) FindOrCreateFolder(ctx context.Context, dirname, parentID string) (file *drive.File, err error) {
+	dirname = strings.TrimSpace(dirname)
+	query := fmt.Sprintf("name='%s' and ('%s' in parents) and mimeType='%s'", dirname, parentID, folderMime)
+
+	data, err, _ := d.sg.Do(query, func() (interface{}, error) {
+		files, err := d.List(ctx, query)
 		if err != nil {
-			return nil, fmt.Errorf("Error listing creating folder for query: %s: %w", query, err)
+			return nil, fmt.Errorf("Error listing files for query: %s: %w", query, err)
 		}
-		return createdFolder, nil
+		if len(files) == 0 {
+
+			log.Printf("Could not find dir: %s. Creating. Query: %s", dirname, query)
+			newFolder := &drive.File{
+				Name:     dirname,
+				MimeType: folderMime,
+				Parents:  []string{parentID},
+			}
+			createdFolder, err := d.service.Files.Create(newFolder).SupportsAllDrives(true).Do()
+			if err != nil {
+				return nil, fmt.Errorf("Error listing creating folder for query: %s: %w", query, err)
+			}
+			return createdFolder, nil
+		}
+		return files[0], nil
+	})
+
+	if err != nil {
+		return nil, err
 	}
-	return files[0], nil
+	return data.(*drive.File), nil
 }
 
+// ListSpace lists all files within the "drive" space
 func (d *Drive) List(ctx context.Context, query ...string) (files []*drive.File, err error) {
-	return d.ListSpace(ctx, "drive", query...)
+	return d.ListSpace(ctx, "drive", nil, query...)
 }
 
-func (d *Drive) ListSpace(ctx context.Context, space string, query ...string) (files []*drive.File, err error) {
+// ListSpace lists all files within a specified space ("appDataFolder", "drive", etc...)
+func (d *Drive) ListSpace(ctx context.Context, space string, progressCallback func(int) error, query ...string) (files []*drive.File, err error) {
 
 	pageToken := ""
 	call := d.service.Files.List().Spaces(space).PageSize(1000).
@@ -162,6 +181,12 @@ func (d *Drive) ListSpace(ctx context.Context, space string, query ...string) (f
 			return nil, err
 		}
 		files = append(files, list.Files...)
+		if progressCallback != nil {
+			err = progressCallback(len(list.Files))
+			if err != nil {
+				return nil, fmt.Errorf("Error incrementing progress bar: %w", err)
+			}
+		}
 
 		pageToken = list.NextPageToken
 		if pageToken == "" {
@@ -230,48 +255,9 @@ func (d *Drive) DeleteAllFiles(ctx context.Context) error {
 	return group.Wait()
 }
 
-// ListRecordIds returns a map of Record ids to Drive file ids
-func (d *Drive) ListRecordIds(ctx context.Context) (map[string]string, error) {
-
-	fileIDs := map[string]string{}
-	pageToken := ""
-
-	for {
-		call := d.service.Files.List().
-			SupportsAllDrives(true).
-			IncludeItemsFromAllDrives(true).
-			Fields("nextPageToken, files(id, name, properties)")
-
-		if pageToken != "" {
-			call = call.PageToken(pageToken)
-		}
-
-		r, err := call.Do()
-		if err != nil {
-			return nil, fmt.Errorf("Error listing files: %w", err)
-		}
-
-		for _, f := range r.Files {
-			id, ok := f.Properties["record_id"]
-			if !ok {
-				fmt.Printf("Record id not found for file: %s: %s\n", f.Name, f.Id)
-				continue
-			}
-
-			fileIDs[id] = f.Id
-		}
-
-		if r.NextPageToken == "" {
-			break // No more pages
-		}
-		pageToken = r.NextPageToken
-	}
-
-	return fileIDs, nil
-}
-
 // DownloadFile downloads the specified Drive file
 func (d *Drive) DownloadFile(ctx context.Context, id string) (io.ReadCloser, error) {
+	// fmt.Println("Downloading file: " + id)
 	resp, err := d.service.Files.Get(id).Download()
 	if err != nil {
 		return nil, fmt.Errorf("failed to download file: %w", err)
@@ -344,7 +330,7 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 	hasher := sha256.New()
 	teeReader := io.TeeReader(reader, hasher)
 
-	// upload file to temporary folder
+	// upload temp file
 	file, err = d.UploadFile(ctx, metadata, teeReader)
 	if err != nil {
 		return err
@@ -376,7 +362,7 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 		return nil
 	}
 
-	// move file to final destination and update hash field
+	// update hash field of file
 	_, err = d.service.Files.Update(file.Id, &drive.File{
 		ModifiedTime: file.ModifiedTime,
 		Properties: map[string]string{
@@ -385,7 +371,7 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 	}).SupportsAllDrives(true).Do()
 
 	if err != nil {
-		return fmt.Errorf("Erroring moving file from appDataFolder folder: %w", err)
+		return fmt.Errorf("Erroring updating file: %s", err.Error())
 	}
 
 	successful = true
