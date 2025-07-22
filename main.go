@@ -15,6 +15,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
@@ -52,10 +53,19 @@ var (
 		RESOLUTIONS:    "Resolutions",
 		STAFF_REPORTS:  "Staff Reports",
 	}
+
+	recordFileIDMap map[RecordType]string = map[RecordType]string{
+		COMMUNICATIONS: "1CGCnvURuCUGuh9k0A_X3uBitnd2tj3AUulZmIUPbSWqnDGgm5w",
+		CONTRACTS:      "1o1PIOaC6Jq96lpHMBAZsxG_KNr-iEMzQS7VRKgFTE_3X6jsymg",
+		ELECTION_INFO:  "11pA3rskexWYGr7sACbZp3QovH-eKxUwiN1fTRJwVQmdYZRMxug",
+		MINUTES:        "1zuIuxONHEnnOMEHRNsLX-0_QYrhKVRZEcnZuMKxoIzg676NdMQ",
+		ORDINACES:      "1VuYkZPlCILRoyi17Htl7dfc5puR3q-P-lCqCCynYZc-TyBVMeg",
+		RESOLUTIONS:    "1ArC3kTQO18Bjgph9MJ3zMHxqHbKhQndqaqfU6SI0gXN-Bx1mqQ",
+		STAFF_REPORTS:  "1FHicNSjVKS9BCOSuFPRPoVbfyvHVzCy3W15xfyq8n-Aea4UerQ",
+	}
 )
 
 var client = &http.Client{}
-var driveService *Drive
 var failedRecords sync.Map
 
 func init() {
@@ -81,6 +91,10 @@ func cleanup() {
 
 func main() {
 
+	defer cleanup()
+
+	ctx := context.Background()
+
 	if driveID == "" {
 		log.Fatalf("Missing %s env var", SHARED_DRIVE_ID_ENV_VAR)
 	}
@@ -89,69 +103,32 @@ func main() {
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 		<-sigs
-		log.Println("Caught shutdown signal")
+		log.Println("Caught shutdown signal, cleaning up")
 		cleanup()
 	}()
 
-	ctx := context.Background()
-
-	var err error
-
-	driveService, err = NewDrive(ctx, driveID)
+	driveService, err := NewDrive(ctx, driveID)
 
 	if err != nil {
 		log.Println("Error initializing drive service:", err)
 		return
 	}
 
-	// fileMap, err := buildFileMap(ctx, driveService)
-	// if err != nil {
-	// 	log.Println("Error building filemape:", err)
-	// 	return
-	// }
-
-	// group, gctx := errgroup.WithContext(ctx)
 	for id, name := range recordTypeMap {
-		// group.Go(func() error {
+
 		count, err := syncRecords(ctx, driveService, id)
 		if err != nil {
 			log.Println("Error syncing records:", err)
 			return
 		}
 		log.Printf("sync'd %d files of type: %s", count, name)
-		// })
-	}
 
-	// err = group.Wait()
+	}
 
 	if err != nil {
 		log.Println(err)
 	}
 
-	cleanup()
-
-}
-
-func buildFileMap(ctx context.Context, driveService *Drive) (*DriveFileMap, error) {
-
-	bar := progressbar.Default(
-		int64(-1),
-		fmt.Sprintf("Fetching existing files from Drive"),
-	)
-
-	defer func() {
-		bar.Finish()
-		bar.Exit()
-	}()
-
-	files, err := driveService.ListSpace(ctx, "drive", bar.Add)
-
-	if err != nil {
-		log.Println("Error listing files:", err)
-		return nil, err
-	}
-
-	return NewDriveFileMap(files), nil
 }
 
 // syncRecords syncs all records of recordType from the city repository to Drive
@@ -171,7 +148,7 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 		if count == 0 {
 			return
 		}
-		serr := saveRecords(ctx, records)
+		serr := saveRecords(ctx, driveService, records)
 		if serr != nil {
 			fmt.Printf("Error saving records of type: %s: %s", recordTypeMap[recordType], serr.Error())
 		}
@@ -191,10 +168,8 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 		fmt.Sprintf("Syncing %s", name),
 	)
 
-	defer func() {
-		bar.Finish()
-		bar.Exit()
-	}()
+	defer bar.Exit()
+	defer bar.Finish()
 
 	group, gctx := errgroup.WithContext(ctx)
 	tasks := make(chan *Record)
@@ -284,7 +259,7 @@ func transferRecord(ctx context.Context, driveService *Drive, record *Record) er
 // If the set of records is too old (older than 7 days), they are refetched and cached again.
 func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) (*Records, error) {
 
-	var data Records
+	var data *Records
 
 	name := recordTypeMap[queryID]
 	key, _ := propertyKeyValue(name, "")
@@ -312,8 +287,6 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 	// If the set of records are too old, refetch from city records site
 	var reader io.ReadCloser
 
-	query := fmt.Sprintf("properties has { key='record_id' and value='%s' }", recordID)
-
 	bar := progressbar.Default(
 		int64(-1),
 		fmt.Sprintf("Fetching records for: %s", name),
@@ -323,22 +296,23 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 		bar.Exit()
 	}()
 
-	files, err := driveService.ListSpace(ctx, appDataFolderID, bar.Add, query)
-	if err != nil {
-		return nil, fmt.Errorf("Error fetching file: %w", err)
+	id, ok := recordFileIDMap[queryID]
+	if !ok {
+		return nil, fmt.Errorf("Record file not found for type: %s", name)
 	}
 
-	// var created time.Time
-	if len(files) > 0 {
-		file := files[0]
-		reader, err = driveService.DownloadFile(ctx, file.Id)
-		if err != nil {
-			return nil, fmt.Errorf("Error parsing created time: %w", err)
-		}
-		if reader == nil {
-			panic("file not found")
-		}
+	file, reader, err := driveService.DownloadFile(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("Error fetching records file: %w", err)
 	}
+
+	defer reader.Close()
+	data = &Records{}
+	data.DriveFileID = file.Id
+	decoder := json.NewDecoder(reader)
+	err = decoder.Decode(data)
+
+	return data, err
 
 	// check if records are out of date
 	// if diff := time.Now().Sub(created); diff.Hours() < 24 {
@@ -349,27 +323,33 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 	// 	}
 	// }
 
-	if reader != nil {
-		// fmt.Println("Fetched cached records for type: ", name)
-		defer reader.Close()
-		decoder := json.NewDecoder(reader)
-		err := decoder.Decode(&data)
-		return &data, err
-	}
+	// data, err = fetchRecordsFromCityPortal(ctx, queryID, time.Now().AddDate(-1, 0, 0))
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// return data, nil
+}
+
+// fetchRecordsFromCityPortal fetches records of RecordType from the city records portal
+func fetchRecordsFromCityPortal(ctx context.Context, queryID RecordType, since time.Time) (*Records, error) {
+
+	var data Records
 
 	payload := struct {
 		QueryID    int
+		FromDate   string `json:"Fromdate,omitempty"`
 		Keywords   []string
 		QueryLimit int
 	}{
-		int(queryID),
-		[]string{},
-		0,
+		QueryID:    int(queryID),
+		FromDate:   since.Format(dateFormat),
+		Keywords:   []string{},
+		QueryLimit: 0,
 	}
 
 	b, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("Error marshalling payload: %s: %w", recordID, err)
+		return nil, fmt.Errorf("Error marshalling payload: %s: %w", queryID, err)
 	}
 
 	fmt.Printf("Fetching records: %s\n", recordTypeMap[queryID])
@@ -380,7 +360,7 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 		bytes.NewReader(b))
 
 	if err != nil {
-		return nil, fmt.Errorf("Error creating request: %s: %w", recordID, err)
+		return nil, fmt.Errorf("Error creating request: %s: %w", queryID, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -405,31 +385,17 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 		return nil, err
 	}
 
-	// Upload to drive
-	file := &drive.File{
-		Name:    key + ".json",
-		Parents: []string{appDataFolderID},
-		Properties: map[string]string{
-			"record_id": recordID,
-		},
-	}
-	_, err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("Error uploading records: %s: %w", recordID, err)
-	}
-
 	// Unmarshal the JSON response into the ResponseData struct
 	err = json.Unmarshal(body, &data)
 	if err != nil {
-		return nil, fmt.Errorf("Error marshaling json: %s: %w", recordID, err)
+		return nil, fmt.Errorf("Error marshaling json: %s: %w", queryID, err)
 	}
 
 	return &data, nil
-
 }
 
 // saveRecords persists records, along with any update state (i.e. Persisted), back to Drive
-func saveRecords(ctx context.Context, data *Records) error {
+func saveRecords(ctx context.Context, driveService *Drive, data *Records) error {
 
 	fmt.Println("Saving records: " + data.Name)
 	body, err := json.Marshal(data)
@@ -444,8 +410,12 @@ func saveRecords(ctx context.Context, data *Records) error {
 			"record_id": data.ID,
 		},
 	}
+	if data.DriveFileID == "" {
+		_, err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
+	} else {
+		err = driveService.UpdateFile(ctx, data.DriveFileID, bytes.NewReader(body))
+	}
 
-	_, err = driveService.UploadFile(ctx, file, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("Error saving records: %s: %w", data.ID, err)
 	}
@@ -454,6 +424,8 @@ func saveRecords(ctx context.Context, data *Records) error {
 	return nil
 }
 
+// fetchDocument fetches the specified document by id from the city records portal
+// returns a byte stream (ReadCloser), the total file size, or an error if any
 func fetchDocument(ctx context.Context, origID string) (io.ReadCloser, int64, error) {
 	// log.Printf("Fetching record id: %s", origID)
 	id := url.QueryEscape(origID)

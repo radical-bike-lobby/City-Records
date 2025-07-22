@@ -17,32 +17,6 @@ const (
 
 type DriveFolderID string
 
-type DriveFileMap struct {
-	FileMap map[string][]*drive.File
-}
-
-func NewDriveFileMap(files []*drive.File) *DriveFileMap {
-	fileMap := make(map[string][]*drive.File)
-	for _, file := range files {
-
-		hash := file.Properties["hash"]
-		record_id := file.Properties["record_id"]
-		if hash == "" || record_id == "" { // files without a hash should not be indexed
-			continue
-		}
-
-		fileMap[record_id] = append(fileMap[record_id], file)
-	}
-
-	return &DriveFileMap{
-		FileMap: fileMap,
-	}
-}
-
-func (d *DriveFileMap) Get(record *Record) (files []*drive.File, err error) {
-	return d.FileMap[record.ID], nil
-}
-
 type Record struct {
 	ID                  string               `json:"ID"`
 	Type                RecordType           `json:"-"` // This field will be ignored
@@ -61,6 +35,7 @@ type Records struct {
 	Data           []*Record       `json:"Data"`
 	Truncated      bool            `json:"Truncated"`
 	DisplayColumns []DisplayColumn `json:"DisplayColumns"`
+	DriveFileID    string          `json:"-"`
 }
 
 type DisplayColumn struct {

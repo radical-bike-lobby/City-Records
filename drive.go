@@ -166,6 +166,7 @@ func (d *Drive) ListSpace(ctx context.Context, space string, progressCallback fu
 		IncludeItemsFromAllDrives(true).
 		SupportsAllDrives(true).
 		Fields("nextPageToken, files(" + fields + ")")
+		// OrderBy("modifiedDate desc,name")
 	if len(query) > 0 {
 		call = call.Q(query[0])
 	}
@@ -209,8 +210,8 @@ func (d *Drive) PrintAllFiles(ctx context.Context) error {
 	return nil
 }
 
-func (d *Drive) Delete(ctx context.Context, id string) error {
-	// log.Printf("Deleting file with ID: : %s", id)
+func (d *Drive) DeleteFile(ctx context.Context, id string) error {
+	log.Printf("Deleting file with ID: : %s", id)
 	return d.service.Files.Delete(id).
 		SupportsAllDrives(true).
 		Do()
@@ -231,7 +232,7 @@ func (d *Drive) DeleteAllFiles(ctx context.Context) error {
 	for i := 0; i < 50; i++ {
 		group.Go(func() error {
 			for file := range tasks {
-				err := d.Delete(gctx, file.Id)
+				err := d.DeleteFile(gctx, file.Id)
 				if err != nil {
 					return fmt.Errorf("Error deleting file: %s. %w", file.Name, err)
 				}
@@ -256,13 +257,19 @@ func (d *Drive) DeleteAllFiles(ctx context.Context) error {
 }
 
 // DownloadFile downloads the specified Drive file
-func (d *Drive) DownloadFile(ctx context.Context, id string) (io.ReadCloser, error) {
+func (d *Drive) DownloadFile(ctx context.Context, id string) (*drive.File, io.ReadCloser, error) {
 	// fmt.Println("Downloading file: " + id)
+
+	file, err := d.service.Files.Get(id).Do()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	resp, err := d.service.Files.Get(id).Download()
 	if err != nil {
-		return nil, fmt.Errorf("failed to download file: %w", err)
+		return nil, nil, fmt.Errorf("failed to download file: %w", err)
 	}
-	return resp.Body, nil
+	return file, resp.Body, nil
 }
 
 func (d *Drive) MoveFile(ctx context.Context, file *drive.File, folderID string) error {
@@ -272,6 +279,15 @@ func (d *Drive) MoveFile(ctx context.Context, file *drive.File, folderID string)
 		SupportsAllDrives(true).
 		RemoveParents(strings.Join(file.Parents, ",")).
 		AddParents(folderID).
+		Do()
+
+	return err
+}
+
+func (d *Drive) UpdateFile(ctx context.Context, fileID string, body io.Reader) error {
+	_, err := d.service.Files.Update(fileID, &drive.File{}).
+		SupportsAllDrives(true).
+		Media(body).
 		Do()
 
 	return err
@@ -342,7 +358,7 @@ func (d *Drive) UploadRecord(ctx context.Context, record *Record, reader io.Read
 		if successful {
 			return
 		}
-		derr := d.Delete(ctx, file.Id)
+		derr := d.DeleteFile(ctx, file.Id)
 		if derr != nil {
 			fmt.Printf("Error cleaning up temp file: %s", derr.Error())
 		}
