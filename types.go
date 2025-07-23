@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,18 @@ type Records struct {
 	Truncated      bool            `json:"Truncated"`
 	DisplayColumns []DisplayColumn `json:"DisplayColumns"`
 	DriveFileID    string          `json:"-"`
+}
+
+func (r *Records) Sort() {
+	slices.SortFunc(r.Data, func(i, j *Record) int {
+		first, _ := i.DocDate()
+		second, _ := j.DocDate()
+		return second.Compare(first)
+	})
+}
+
+func (r *Records) Merge(other *Records) {
+
 }
 
 type DisplayColumn struct {

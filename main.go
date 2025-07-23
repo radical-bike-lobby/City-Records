@@ -312,22 +312,28 @@ func fetchRecords(ctx context.Context, driveService *Drive, queryID RecordType) 
 	decoder := json.NewDecoder(reader)
 	err = decoder.Decode(data)
 
-	return data, err
+	// sort descending
+	data.Sort()
+
+	var last time.Time
+	if len(data.Data) > 0 {
+		last, _ = data.Data[0].DocDate()
+	}
 
 	// check if records are out of date
-	// if diff := time.Now().Sub(created); diff.Hours() < 24 {
-	// 	reader, err = driveService.DownloadFile(ctx, file.Id)
-	// 	if err != nil {
-	// 		fmt.Println("Error downloading file: " + recordID)
-	// 		return nil, fmt.Errorf("Error downloading file: %s: %w", recordID, err)
-	// 	}
-	// }
+	if diff := time.Now().Sub(last); diff.Hours() < 24 {
+		return data, err
+	}
 
-	// data, err = fetchRecordsFromCityPortal(ctx, queryID, time.Now().AddDate(-1, 0, 0))
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// return data, nil
+	newData, err := fetchRecordsFromCityPortal(ctx, queryID, time.Now().AddDate(-1, 0, 0))
+	if err != nil {
+		return nil, err
+	}
+
+	newData.Sort()
+	data.Merge(newData)
+
+	return data, err
 }
 
 // fetchRecordsFromCityPortal fetches records of RecordType from the city records portal
