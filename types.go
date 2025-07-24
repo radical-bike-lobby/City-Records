@@ -47,8 +47,18 @@ func (r *Records) Sort() {
 	})
 }
 
-func (r *Records) Merge(other *Records) {
-
+// Merge merges the records found in the 'other' with those found in r
+// New records found in other, not present in r, are append to r's records (Data field)
+func (r *Records) Merge(other *Records) (newRecords []*Record) {
+	for _, candidate := range other.Data {
+		if !slices.ContainsFunc(r.Data, func(record *Record) bool {
+			return record.Equal(candidate)
+		}) {
+			newRecords = append(newRecords, candidate)
+			r.Data = append(r.Data, candidate)
+		}
+	}
+	return newRecords
 }
 
 type DisplayColumn struct {
@@ -59,6 +69,10 @@ type DisplayColumn struct {
 type DisplayColumnValue struct {
 	Value    string
 	RawValue string
+}
+
+func (d DisplayColumnValue) Equal(other DisplayColumnValue) bool {
+	return d.Value == other.Value && d.RawValue == other.RawValue
 }
 
 func NewRecord(name, parent string, date time.Time) *Record {
@@ -87,10 +101,19 @@ func (r *Record) Equal(other *Record) bool {
 		return true
 	}
 
+	colummsEqual := slices.EqualFunc(r.DisplayColumnValues, other.DisplayColumnValues, func(a, b DisplayColumnValue) bool {
+		return a.Equal(b)
+	})
+
+	if r.Name == other.Name && colummsEqual {
+		return true
+	}
+
 	return false
 
 }
 
+// Merge merges the fields from 'fixed' into r
 func (r *Record) Merge(fixed Record) {
 
 	if fixed.Name != "" {
@@ -246,4 +269,34 @@ func (r Record) ToDriveFile() (*drive.File, error) {
 	}
 
 	return metadata, nil
+}
+
+func (r *Record) String() string {
+
+	var b strings.Builder // Use strings.Builder for efficient string concatenation
+
+	b.WriteString(fmt.Sprintf("Record{ID: %s, Name: %s", r.ID, r.Name))
+
+	if r.DisplayType != "" {
+		b.WriteString(fmt.Sprintf(", DisplayType: %s", r.DisplayType))
+	}
+
+	if len(r.DisplayColumnValues) > 0 {
+		b.WriteString(", DisplayColumnValues: [")
+		for i, dcv := range r.DisplayColumnValues {
+			b.WriteString(fmt.Sprintf("%s: %s", dcv.Value, dcv.RawValue))
+			if i < len(r.DisplayColumnValues)-1 {
+				b.WriteString(", ")
+			}
+		}
+		b.WriteString("]")
+	}
+
+	if r.Summary != "" {
+		b.WriteString(fmt.Sprintf(", Summary: %q", r.Summary)) // Using %q for quoted string
+	}
+
+	b.WriteString(fmt.Sprintf(", Persisted: %t}", r.Persisted))
+
+	return b.String()
 }

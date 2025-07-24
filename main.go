@@ -162,6 +162,10 @@ func syncRecords(ctx context.Context, driveService *Drive, recordType RecordType
 		newRecords = append(newRecords, record)
 	}
 
+	// b, _ := json.MarshalIndent(newRecords, " ", " ")
+	// fmt.Println(string(b))
+	// os.Exit(1)
+
 	name := recordTypeMap[recordType]
 	bar := progressbar.Default(
 		int64(len(newRecords)),
@@ -355,10 +359,10 @@ func fetchRecordsFromCityPortal(ctx context.Context, queryID RecordType, since t
 
 	b, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("Error marshalling payload: %s: %w", queryID, err)
+		return nil, fmt.Errorf("Error marshalling payload: %s: %w", recordTypeMap[queryID], err)
 	}
 
-	fmt.Printf("Fetching records: %s\n", recordTypeMap[queryID])
+	// fmt.Printf("Fetching records: %s\n", recordTypeMap[queryID])
 	req, err := http.NewRequestWithContext(
 		ctx,
 		"POST",
@@ -366,14 +370,14 @@ func fetchRecordsFromCityPortal(ctx context.Context, queryID RecordType, since t
 		bytes.NewReader(b))
 
 	if err != nil {
-		return nil, fmt.Errorf("Error creating request: %s: %w", queryID, err)
+		return nil, fmt.Errorf("Error creating request: %s: %w", recordTypeMap[queryID], err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error sending request for queryID: %d: %v", queryID, err)
+		log.Printf("Error sending request for queryID: %s: %v", recordTypeMap[queryID], err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -394,7 +398,7 @@ func fetchRecordsFromCityPortal(ctx context.Context, queryID RecordType, since t
 	// Unmarshal the JSON response into the ResponseData struct
 	err = json.Unmarshal(body, &data)
 	if err != nil {
-		return nil, fmt.Errorf("Error marshaling json: %s: %w", queryID, err)
+		return nil, fmt.Errorf("Error marshaling json: %s: %w", recordTypeMap[queryID], err)
 	}
 
 	return &data, nil
