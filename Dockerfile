@@ -1,7 +1,7 @@
 FROM golang:1.23.0
 
 # Set destination for COPY
-WORKDIR /app
+WORKDIR .
 
 # Download Go modules
 COPY go.mod go.sum ./
@@ -11,8 +11,6 @@ COPY *.go ./
 
 # Build
 RUN CGO_ENABLED=0 GOOS=linux go build -o /city-records
-
-EXPOSE 8080
 
 # Run
 CMD ["/city-records"]

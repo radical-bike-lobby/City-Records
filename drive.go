@@ -20,6 +20,7 @@ import (
 	"google.golang.org/api/option"
 )
 
+var credentials = os.Getenv("CREDENTIALS")
 var credentialsFile = os.Getenv("CREDENTIALS_FILE")
 var userToImpersonate = os.Getenv("IMPERSONATE_SUBJECT")
 
@@ -39,20 +40,25 @@ type Drive struct {
 // NewDrive creates a new drive service
 func NewDrive(ctx context.Context, driveID string) (*Drive, error) {
 
-	file, err := os.Open(credentialsFile)
-	if err != nil {
-		return nil, fmt.Errorf("Error opening file: %s, %v", credentialsFile, err)
-	}
-	defer file.Close()
+	var err error
+	content := []byte(credentials)
+	if len(content) == 0 {
 
-	content, err := io.ReadAll(file)
-	if err != nil {
-		return nil, fmt.Errorf("Error reading file: %s, %v", credentialsFile, err)
+		file, err := os.Open(credentialsFile)
+		if err != nil {
+			return nil, fmt.Errorf("Error opening file: %s, %v", credentialsFile, err)
+		}
+		defer file.Close()
 
+		content, err = io.ReadAll(file)
+		if err != nil {
+			return nil, fmt.Errorf("Error reading file: %s, %v", credentialsFile, err)
+
+		}
 	}
 
 	jwtConfig, err := google.JWTConfigFromJSON(
-		[]byte(content),
+		content,
 		drive.DriveScope,
 		drive.DriveAppdataScope,
 	)
